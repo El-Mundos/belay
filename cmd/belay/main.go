@@ -14,6 +14,7 @@ import (
 	"github.com/belay-sh/belay/internal/compose"
 	"github.com/belay-sh/belay/internal/engine"
 	"github.com/belay-sh/belay/internal/health"
+	"github.com/belay-sh/belay/internal/registry"
 	"github.com/belay-sh/belay/internal/version"
 )
 
@@ -21,6 +22,8 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `belay %s — safe Docker Compose updates, with automatic rollback.
 
 usage:
+  belay check <compose-file|dir>
+                   list services that have newer stable versions available
   belay update [flags] <compose-file|dir> <service> <new-image>
                    update one service, health-check it, and roll back on failure
   belay server     start the web UI + controller (includes a local agent)
@@ -35,6 +38,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "check":
+		runCheck(os.Args[2:])
 	case "update":
 		runUpdate(os.Args[2:])
 	case "server":
@@ -47,6 +52,48 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+func runCheck(args []string) {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: belay check <compose-file|dir>")
+		os.Exit(2)
+	}
+	file, err := compose.FileFor(args[0])
+	if err != nil {
+		fatal(err)
+	}
+	services, err := compose.Services(file)
+	if err != nil {
+		fatal(err)
+	}
+	rc := registry.New()
+	ctx := context.Background()
+	updates := 0
+	for _, s := range services {
+		if s.Image == "" || !strings.Contains(s.Image, ":") {
+			continue // build-only or untagged
+		}
+		ref := registry.ParseRef(s.Image)
+		newer, comparable, err := rc.Newer(ctx, ref)
+		switch {
+		case err != nil:
+			fmt.Printf("  %-16s %-32s  error: %v\n", s.Name, ref.Tag, err)
+		case !comparable:
+			fmt.Printf("  %-16s %-32s  (non-semver tag — skipped)\n", s.Name, ref.Tag)
+		case len(newer) == 0:
+			fmt.Printf("  %-16s %-32s  up to date\n", s.Name, ref.Tag)
+		default:
+			updates++
+			latest := newer[len(newer)-1]
+			extra := ""
+			if len(newer) > 1 {
+				extra = fmt.Sprintf("  (+%d more)", len(newer)-1)
+			}
+			fmt.Printf("  %-16s %-32s→ %s%s\n", s.Name, ref.Tag, latest, extra)
+		}
+	}
+	fmt.Printf("\n%d service(s) with updates available.\n", updates)
 }
 
 func runUpdate(args []string) {

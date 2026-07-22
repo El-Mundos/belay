@@ -54,6 +54,42 @@ func SetImage(file, service, newImage string) error {
 	return replaceOnLine(file, n.Line, n.Value, newImage)
 }
 
+// Service is a compose service and its pinned image (empty if the service builds instead of pulling).
+type Service struct {
+	Name  string
+	Image string
+}
+
+// Services lists all services in the compose file with their image refs, in file order.
+func Services(file string) ([]Service, error) {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", file, err)
+	}
+	root := &doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		root = root.Content[0]
+	}
+	services := mapValue(root, "services")
+	if services == nil || services.Kind != yaml.MappingNode {
+		return nil, nil
+	}
+	var out []Service
+	for i := 0; i+1 < len(services.Content); i += 2 {
+		name := services.Content[i].Value
+		img := ""
+		if n := mapValue(services.Content[i+1], "image"); n != nil {
+			img = n.Value
+		}
+		out = append(out, Service{Name: name, Image: img})
+	}
+	return out, nil
+}
+
 func imageNode(file, service string) (*yaml.Node, error) {
 	b, err := os.ReadFile(file)
 	if err != nil {
