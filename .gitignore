@@ -1,0 +1,6 @@
+/belay
+/dist/
+*.db
+*.sqlite
+.env
+data/
