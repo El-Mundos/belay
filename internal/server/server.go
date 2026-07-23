@@ -1,5 +1,5 @@
-// Package server is Belay's web UI + controller: a dashboard that shows available updates and
-// applies them through the safe-update engine (health-gated, auto-rollback).
+// Package server is Belay's web UI + controller: three tabs (Updates / Failed / History) backed by
+// the safe-update engine (health-gated, auto-rollback). Every update attempt is recorded.
 package server
 
 import (
@@ -21,33 +21,33 @@ import (
 	"github.com/belay-sh/belay/internal/engine"
 	"github.com/belay-sh/belay/internal/health"
 	"github.com/belay-sh/belay/internal/registry"
+	"github.com/belay-sh/belay/internal/store"
 	"github.com/belay-sh/belay/web"
 )
 
-// Project is a compose project the server manages.
 type Project struct {
 	ID   int
 	Name string
 	File string
 }
 
-// Config configures the server.
 type Config struct {
 	Addr          string
 	Projects      []Project
-	Password      string        // built-in login; empty = no built-in auth
-	ForwardHeader string        // trusted reverse-proxy user header (e.g. X-authentik-username)
-	Timeout       time.Duration // health-gate timeout
-	MinUptime     time.Duration // stayed-running window
+	Password      string
+	ForwardHeader string
+	Timeout       time.Duration
+	MinUptime     time.Duration
 }
 
 type Server struct {
-	cfg  Config
-	reg  *registry.Client
-	eng  *engine.Engine
-	tpl  map[string]*template.Template
-	mu   sync.Mutex
-	sess map[string]struct{}
+	cfg   Config
+	reg   *registry.Client
+	eng   *engine.Engine
+	store *store.Store
+	tpl   map[string]*template.Template
+	mu    sync.Mutex
+	sess  map[string]struct{}
 }
 
 func New(cfg Config) *Server {
@@ -62,11 +62,14 @@ func New(cfg Config) *Server {
 		return template.Must(template.New("").Funcs(funcs).ParseFS(web.FS, files...))
 	}
 	return &Server{
-		cfg: cfg,
-		reg: registry.New(),
-		eng: &engine.Engine{Deployer: agent.Local{}, Health: health.Gate{Timeout: cfg.Timeout, MinUptime: cfg.MinUptime}},
+		cfg:   cfg,
+		reg:   registry.New(),
+		eng:   &engine.Engine{Deployer: agent.Local{}, Health: health.Gate{Timeout: cfg.Timeout, MinUptime: cfg.MinUptime}},
+		store: store.New(),
 		tpl: map[string]*template.Template{
 			"dashboard": page("templates/layout.html", "templates/dashboard.html"),
+			"failed":    page("templates/layout.html", "templates/failed.html"),
+			"history":   page("templates/layout.html", "templates/history.html"),
 			"login":     page("templates/layout.html", "templates/login.html"),
 			"status":    page("templates/status.html"),
 			"result":    page("templates/result.html"),
@@ -83,11 +86,14 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /login", s.handleLogin)
 	mux.HandleFunc("GET /logout", s.handleLogout)
 	mux.HandleFunc("GET /{$}", s.guard(s.handleDashboard))
+	mux.HandleFunc("GET /failed", s.guard(s.handleFailed))
+	mux.HandleFunc("GET /history", s.guard(s.handleHistory))
 	mux.HandleFunc("GET /check", s.guard(s.handleCheck))
 	mux.HandleFunc("POST /update", s.guard(s.handleUpdate))
+	mux.HandleFunc("POST /update-all", s.guard(s.handleUpdateAll))
 
 	if !s.authEnabled() {
-		log.Printf("WARNING: no auth configured (set --password or --forward-header). Bind to localhost only.")
+		log.Printf("WARNING: no auth configured (set --password or --forward-header); bind to localhost only.")
 	}
 	log.Printf("belay server on http://%s  (%d project(s))", s.cfg.Addr, len(s.cfg.Projects))
 	return http.ListenAndServe(s.cfg.Addr, mux)
@@ -133,11 +139,11 @@ func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.FormValue("password") != s.cfg.Password || s.cfg.Password == "" {
+	if s.cfg.Password == "" || r.FormValue("password") != s.cfg.Password {
 		s.render(w, "login", map[string]any{"Error": "Incorrect password."})
 		return
 	}
-	tok := token()
+	tok := newToken()
 	s.mu.Lock()
 	s.sess[tok] = struct{}{}
 	s.mu.Unlock()
@@ -155,12 +161,15 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
-// ---- pages ----
+// ---- shared page data ----
 
-type svcView struct {
-	Name  string
-	Image string
+func (s *Server) base(r *http.Request, active string) map[string]any {
+	return map[string]any{"User": s.user(r), "Active": active, "FailedCount": len(s.store.Failed())}
 }
+
+// ---- tabs ----
+
+type svcView struct{ Name, Image string }
 type projView struct {
 	ID       int
 	Name     string
@@ -182,7 +191,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		projects = append(projects, pv)
 	}
-	s.render(w, "dashboard", map[string]any{"User": s.user(r), "Projects": projects})
+	data := s.base(r, "updates")
+	data["Projects"] = projects
+	s.render(w, "dashboard", data)
+}
+
+func (s *Server) handleFailed(w http.ResponseWriter, r *http.Request) {
+	data := s.base(r, "failed")
+	data["Records"] = s.store.Failed()
+	s.render(w, "failed", data)
+}
+
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	data := s.base(r, "history")
+	data["Records"] = s.store.Succeeded()
+	s.render(w, "history", data)
 }
 
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
@@ -218,25 +241,17 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown project", http.StatusBadRequest)
 		return
 	}
-	service := r.FormValue("s")
-	target := r.FormValue("image")
-	current, err := compose.FindImage(p.File, service)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+	service, target := r.FormValue("s"), r.FormValue("image")
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout+30*time.Second)
 	defer cancel()
-	res := s.eng.SafeUpdate(ctx, engine.Request{Project: p.File, Service: service, FromImage: current, ToImage: target})
+	res, current := s.applyUpdate(ctx, p, service, target)
 
-	shownImage := current
-	newTag := ""
+	shownImage, newTag := current, ""
 	if res.Outcome == engine.OutcomeUpdated {
 		shownImage = target
 		if i := strings.LastIndex(target, ":"); i >= 0 {
 			newTag = target[i+1:]
 		}
-		_ = compose.CommitIfRepo(p.File, fmt.Sprintf("belay: update %s %s -> %s", service, current, target))
 	}
 	errStr := ""
 	if res.Err != nil {
@@ -247,6 +262,59 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		"Outcome": string(res.Outcome), "NewTag": newTag, "Err": errStr,
 		"Logs": strings.TrimSpace(res.Logs), "Duration": res.Duration.Round(time.Millisecond).String(),
 	})
+}
+
+// handleUpdateAll updates every service that has a newer stable version (sequentially, each
+// health-gated with auto-rollback), then returns to the Updates tab. (Streaming progress = TODO.)
+func (s *Server) handleUpdateAll(w http.ResponseWriter, r *http.Request) {
+	ctx := context.Background()
+	pidFilter := r.FormValue("p")
+	for _, p := range s.cfg.Projects {
+		if pidFilter != "" {
+			if n, err := strconv.Atoi(pidFilter); err != nil || n != p.ID {
+				continue
+			}
+		}
+		services, err := compose.Services(p.File)
+		if err != nil {
+			continue
+		}
+		for _, sv := range services {
+			if sv.Image == "" || !strings.Contains(sv.Image, ":") {
+				continue
+			}
+			ref := registry.ParseRef(sv.Image)
+			newer, comparable, err := s.reg.Newer(ctx, ref)
+			if err != nil || !comparable || len(newer) == 0 {
+				continue
+			}
+			target := strings.TrimSuffix(sv.Image, ":"+ref.Tag) + ":" + newer[len(newer)-1]
+			s.applyUpdate(ctx, p, sv.Name, target)
+		}
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// applyUpdate runs the safe-update engine for one service, commits on success, records the attempt.
+func (s *Server) applyUpdate(ctx context.Context, p Project, service, target string) (engine.Result, string) {
+	current, err := compose.FindImage(p.File, service)
+	if err != nil {
+		return engine.Result{Outcome: engine.OutcomeError, Err: err}, ""
+	}
+	res := s.eng.SafeUpdate(ctx, engine.Request{Project: p.File, Service: service, FromImage: current, ToImage: target})
+	if res.Outcome == engine.OutcomeUpdated {
+		_ = compose.CommitIfRepo(p.File, fmt.Sprintf("belay: update %s %s -> %s", service, current, target))
+	}
+	errStr := ""
+	if res.Err != nil {
+		errStr = res.Err.Error()
+	}
+	s.store.Add(store.Record{
+		Project: p.Name, Service: service, From: current, To: target,
+		Outcome: string(res.Outcome), Err: errStr, Logs: strings.TrimSpace(res.Logs),
+		Duration: res.Duration.Round(time.Millisecond).String(),
+	})
+	return res, current
 }
 
 // ---- helpers ----
@@ -265,18 +333,17 @@ func (s *Server) project(id string) (Project, bool) {
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
-	t := s.tpl[name]
 	root := "layout.html"
 	if name == "status" || name == "result" {
 		root = name
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := t.ExecuteTemplate(w, root, data); err != nil {
+	if err := s.tpl[name].ExecuteTemplate(w, root, data); err != nil {
 		log.Printf("render %s: %v", name, err)
 	}
 }
 
-func token() string {
+func newToken() string {
 	b := make([]byte, 24)
 	rand.Read(b)
 	return hex.EncodeToString(b)

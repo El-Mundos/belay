@@ -1,0 +1,16 @@
+{{define "content"}}
+<h2 class="tabhead">Failed updates</h2>
+{{if not .Records}}<p class="muted">No failed updates. 🎉</p>{{end}}
+{{range .Records}}
+<div class="record fail">
+  <div class="rec-head">
+    <span class="svc">{{.Service}}</span>
+    <span class="mono">{{.From}} → {{.To}}</span>
+    {{if eq .Outcome "rolled_back"}}<span class="badge-err">↩ rolled back</span>{{else}}<span class="badge-err">✕ error</span>{{end}}
+    <span class="muted time">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}}</span>
+  </div>
+  {{if .Err}}<div class="rec-err">{{.Err}}</div>{{end}}
+  {{if .Logs}}<details open><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
+</div>
+{{end}}
+{{end}}

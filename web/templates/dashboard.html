@@ -1,4 +1,10 @@
 {{define "content"}}
+<div class="toolbar">
+  <input class="search" type="search" placeholder="Search services…" oninput="belayFilter(this.value)" autocomplete="off">
+  <form method="post" action="/update-all" onsubmit="return belayConfirm('Update ALL services that have a newer version? Each is health-checked and rolls back automatically if it fails.', this)">
+    <button class="btn" type="submit">Update all</button>
+  </form>
+</div>
 {{if not .Projects}}<p class="muted">No projects configured. Start the server with <code>--project &lt;path&gt;</code>.</p>{{end}}
 {{range $p := .Projects}}
 <section class="project">

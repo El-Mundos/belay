@@ -1,0 +1,14 @@
+# demo stack (old pins so updates show) — nothing here is running; it's just for viewing the UI
+services:
+  traefik:
+    image: traefik:v3.0.0
+  grafana:
+    image: grafana/grafana-oss:11.0.0
+  prometheus:
+    image: prom/prometheus:v2.50.0
+  redis:
+    image: redis:7.2.0
+  authentik:
+    image: ghcr.io/goauthentik/server:2024.6.0
+  postgres:
+    image: postgres:16-alpine

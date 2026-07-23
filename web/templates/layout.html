@@ -7,12 +7,20 @@
 <title>Belay</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/htmx.min.js"></script>
+<script src="/static/app.js" defer></script>
 </head>
 <body>
 <header>
   <div class="brand">⚓ <b>Belay</b> <span class="sub">safe compose updates</span></div>
   {{if .User}}<div class="user">{{.User}} · <a href="/logout">log out</a></div>{{end}}
 </header>
+{{if .Active}}
+<nav class="tabs">
+  <a href="/" class="{{if eq .Active "updates"}}on{{end}}">Updates</a>
+  <a href="/failed" class="{{if eq .Active "failed"}}on{{end}}">Failed{{if .FailedCount}} <span class="badge">{{.FailedCount}}</span>{{end}}</a>
+  <a href="/history" class="{{if eq .Active "history"}}on{{end}}">History</a>
+</nav>
+{{end}}
 <main>
 {{block "content" .}}{{end}}
 </main>

@@ -39,3 +39,36 @@ pre { background:#0a0c10; color:#cdd3e0; padding:10px; border-radius:6px; overfl
 .login input { padding:9px 11px; border:1px solid var(--line); border-radius:6px;
   background:var(--bg); color:var(--text); font-size:14px; }
 .htmx-request { opacity:.6; }
+
+/* tabs */
+.tabs { display:flex; gap:4px; padding:0 22px; border-bottom:1px solid var(--line); max-width:960px; margin:0 auto; }
+.tabs a { padding:11px 16px; color:var(--muted); font-size:13.5px; font-weight:600;
+  border-bottom:2px solid transparent; margin-bottom:-1px; }
+.tabs a:hover { color:var(--text); }
+.tabs a.on { color:var(--text); border-bottom-color:var(--accent); }
+.badge { display:inline-block; min-width:17px; text-align:center; background:var(--err); color:#fff;
+  border-radius:9px; font-size:11px; padding:0 5px; margin-left:3px; }
+
+/* toolbar (search + update all) */
+.toolbar { display:flex; align-items:center; gap:12px; margin-bottom:18px; }
+.search { flex:1; padding:8px 12px; border:1px solid var(--line); border-radius:8px;
+  background:var(--panel); color:var(--text); font-size:13.5px; }
+.tabhead { font-size:16px; margin:0 0 16px; }
+
+/* record cards (Failed tab) */
+.record { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+  padding:12px 14px; margin-bottom:12px; }
+.record.fail { border-left:3px solid var(--err); }
+.rec-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.rec-head .time { margin-left:auto; font-size:12px; }
+.badge-err { color:var(--err); font-weight:600; font-size:12.5px; }
+.rec-err { color:var(--err); font-size:12.5px; margin-top:6px; }
+
+/* modal */
+.modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex;
+  align-items:center; justify-content:center; z-index:50; animation:fade .12s ease; }
+.modal { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+  padding:22px; max-width:420px; width:calc(100% - 40px); box-shadow:0 16px 40px rgba(0,0,0,.4); }
+.modal-q { margin:0 0 18px; line-height:1.5; }
+.modal-actions { display:flex; justify-content:flex-end; gap:10px; }
+@keyframes fade { from { opacity:0 } to { opacity:1 } }
