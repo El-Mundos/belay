@@ -1,0 +1,8 @@
+{{define "content"}}
+<form class="login" method="post" action="/login">
+  <h2>Sign in</h2>
+  {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
+  <input type="password" name="password" placeholder="Password" autofocus required>
+  <button class="btn" type="submit">Sign in</button>
+</form>
+{{end}}

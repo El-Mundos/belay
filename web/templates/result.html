@@ -1,0 +1,15 @@
+{{define "result"}}
+<tr id="row-{{.PID}}-{{.Service}}" class="res res-{{.Outcome}}">
+  <td class="svc">{{.Service}}</td>
+  <td class="mono">{{.Image}}</td>
+  <td class="status">
+    {{if eq .Outcome "updated"}}<span class="ok">✅ updated to {{.NewTag}} <span class="muted">({{.Duration}})</span></span>
+    {{else if eq .Outcome "rolled_back"}}<span class="err">↩️ rolled back — {{.Err}}</span>
+    {{else if eq .Outcome "error"}}<span class="err">❌ {{.Err}} — needs attention</span>
+    {{else if eq .Outcome "skipped"}}<span class="muted">already up to date</span>
+    {{else}}<span class="muted">{{.Outcome}}</span>{{end}}
+    {{if .Logs}}<details><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
+    <button class="btn ghost" hx-get="/check?p={{.PID}}&s={{.Service}}" hx-target="closest td" hx-swap="innerHTML">re-check</button>
+  </td>
+</tr>
+{{end}}

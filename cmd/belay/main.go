@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/belay-sh/belay/internal/engine"
 	"github.com/belay-sh/belay/internal/health"
 	"github.com/belay-sh/belay/internal/registry"
+	"github.com/belay-sh/belay/internal/server"
 	"github.com/belay-sh/belay/internal/version"
 )
 
@@ -43,7 +45,7 @@ func main() {
 	case "update":
 		runUpdate(os.Args[2:])
 	case "server":
-		fmt.Println("belay server: not implemented yet") // TODO
+		runServer(os.Args[2:])
 	case "agent":
 		fmt.Println("belay agent: not implemented yet") // TODO
 	case "version", "-v", "--version":
@@ -51,6 +53,39 @@ func main() {
 	default:
 		usage()
 		os.Exit(2)
+	}
+}
+
+type stringList []string
+
+func (s *stringList) String() string     { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
+
+func runServer(args []string) {
+	fs := flag.NewFlagSet("server", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:8080", "listen address")
+	var projects stringList
+	fs.Var(&projects, "project", "compose project path (file or dir); repeatable")
+	password := fs.String("password", os.Getenv("BELAY_PASSWORD"), "built-in login password (env BELAY_PASSWORD)")
+	forward := fs.String("forward-header", os.Getenv("BELAY_FORWARD_HEADER"), "trusted reverse-proxy user header (e.g. X-authentik-username)")
+	timeout := fs.Duration("timeout", 90*time.Second, "health-gate timeout")
+	minUptime := fs.Duration("min-uptime", 10*time.Second, "stayed-running window when the image has no healthcheck")
+	fs.Parse(args)
+
+	var pl []server.Project
+	for i, p := range projects {
+		file, err := compose.FileFor(p)
+		if err != nil {
+			fatal(err)
+		}
+		pl = append(pl, server.Project{ID: i, Name: filepath.Base(filepath.Dir(file)), File: file})
+	}
+	srv := server.New(server.Config{
+		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
+		Timeout: *timeout, MinUptime: *minUptime,
+	})
+	if err := srv.Run(); err != nil {
+		fatal(err)
 	}
 }
 

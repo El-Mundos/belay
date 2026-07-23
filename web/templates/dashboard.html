@@ -1,0 +1,24 @@
+{{define "content"}}
+{{if not .Projects}}<p class="muted">No projects configured. Start the server with <code>--project &lt;path&gt;</code>.</p>{{end}}
+{{range $p := .Projects}}
+<section class="project">
+  <h2>{{$p.Name}} <span class="path">{{$p.File}}</span></h2>
+  <table>
+    <thead><tr><th>service</th><th>current image</th><th>status</th></tr></thead>
+    <tbody>
+    {{range .Services}}
+      <tr id="row-{{$p.ID}}-{{.Name}}">
+        <td class="svc">{{.Name}}</td>
+        <td class="mono">{{if .Image}}{{.Image}}{{else}}<span class="muted">(build-only)</span>{{end}}</td>
+        {{if .Image}}
+        <td class="status" hx-get="/check?p={{$p.ID}}&s={{.Name}}" hx-trigger="load" hx-swap="innerHTML">
+          <span class="muted">checking…</span>
+        </td>
+        {{else}}<td class="muted">—</td>{{end}}
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+{{end}}

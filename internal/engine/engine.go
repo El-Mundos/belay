@@ -17,10 +17,10 @@ import (
 type Outcome string
 
 const (
-	OutcomeUpdated    Outcome = "updated"      // new version came up healthy
-	OutcomeRolledBack Outcome = "rolled_back"  // new version failed; reverted to the old one
-	OutcomeSkipped    Outcome = "skipped"      // nothing to do (already on target)
-	OutcomeError      Outcome = "error"        // could not complete safely (e.g. rollback failed)
+	OutcomeUpdated    Outcome = "updated"     // new version came up healthy
+	OutcomeRolledBack Outcome = "rolled_back" // new version failed; reverted to the old one
+	OutcomeSkipped    Outcome = "skipped"     // nothing to do (already on target)
+	OutcomeError      Outcome = "error"       // could not complete safely (e.g. rollback failed)
 )
 
 // Request describes a single service update.

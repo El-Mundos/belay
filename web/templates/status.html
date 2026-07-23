@@ -1,0 +1,17 @@
+{{define "status"}}
+{{- if .Err}}<span class="err">error: {{.Err}}</span>
+{{- else if not .Comparable}}<span class="muted">non-semver tag — skipped</span>
+{{- else if not .Latest}}<span class="ok">✓ up to date</span>
+{{- else}}
+  <span class="upd">→ {{.Latest}}{{if gt .Count 1}} <span class="muted">(+{{sub .Count 1}} more)</span>{{end}}</span>
+  <button class="btn"
+          hx-post="/update"
+          hx-vals='{"p":"{{.PID}}","s":"{{.Service}}","image":"{{.Target}}"}'
+          hx-target="#row-{{.PID}}-{{.Service}}"
+          hx-swap="outerHTML"
+          hx-disabled-elt="this"
+          hx-confirm="Update {{.Service}} to {{.Latest}}? It will roll back automatically if it fails to come up healthy.">
+    Update
+  </button>
+{{- end}}
+{{end}}

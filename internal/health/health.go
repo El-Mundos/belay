@@ -1,7 +1,7 @@
 // Package health implements the engine.HealthGate ladder for a freshly-deployed compose service:
 //
-//	1. Docker HEALTHCHECK, if the image defines one (authoritative)
-//	2. otherwise: the container stayed running (not exited/crash-looping) for MinUptime
+//  1. Docker HEALTHCHECK, if the image defines one (authoritative)
+//  2. otherwise: the container stayed running (not exited/crash-looping) for MinUptime
 //
 // A configured HTTP/TCP/log-line probe is a planned middle rung.
 package health

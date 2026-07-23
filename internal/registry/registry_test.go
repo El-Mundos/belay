@@ -12,12 +12,12 @@ import (
 
 func TestParseRef(t *testing.T) {
 	cases := map[string]Ref{
-		"nginx:1.27.1":                    {"registry-1.docker.io", "library/nginx", "1.27.1"},
-		"grafana/grafana-oss:13.0.2":      {"registry-1.docker.io", "grafana/grafana-oss", "13.0.2"},
-		"docker.io/prom/prometheus:v3.0":  {"registry-1.docker.io", "prom/prometheus", "v3.0"},
-		"ghcr.io/prymitive/karma:v0.131":  {"ghcr.io", "prymitive/karma", "v0.131"},
-		"gcr.io/cadvisor/cadvisor:v0.55":  {"gcr.io", "cadvisor/cadvisor", "v0.55"},
-		"localhost:5000/app:1.0":          {"localhost:5000", "app", "1.0"},
+		"nginx:1.27.1":                   {"registry-1.docker.io", "library/nginx", "1.27.1"},
+		"grafana/grafana-oss:13.0.2":     {"registry-1.docker.io", "grafana/grafana-oss", "13.0.2"},
+		"docker.io/prom/prometheus:v3.0": {"registry-1.docker.io", "prom/prometheus", "v3.0"},
+		"ghcr.io/prymitive/karma:v0.131": {"ghcr.io", "prymitive/karma", "v0.131"},
+		"gcr.io/cadvisor/cadvisor:v0.55": {"gcr.io", "cadvisor/cadvisor", "v0.55"},
+		"localhost:5000/app:1.0":         {"localhost:5000", "app", "1.0"},
 	}
 	for in, want := range cases {
 		if got := ParseRef(in); got != want {
