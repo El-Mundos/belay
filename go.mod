@@ -1,4 +1,4 @@
-module github.com/belay-sh/belay
+module github.com/El-Mundos/belay
 
 go 1.26
 

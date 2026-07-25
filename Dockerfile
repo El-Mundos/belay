@@ -6,7 +6,7 @@ RUN go mod download
 COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath \
-    -ldflags "-s -w -X github.com/belay-sh/belay/internal/version.Version=${VERSION}" \
+    -ldflags "-s -w -X github.com/El-Mundos/belay/internal/version.Version=${VERSION}" \
     -o /belay ./cmd/belay
 
 # ---- run ----

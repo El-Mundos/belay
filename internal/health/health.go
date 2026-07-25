@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/belay-sh/belay/internal/compose"
-	"github.com/belay-sh/belay/internal/engine"
+	"github.com/El-Mundos/belay/internal/compose"
+	"github.com/El-Mundos/belay/internal/engine"
 )
 
 type Gate struct {

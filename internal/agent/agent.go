@@ -8,8 +8,8 @@ import (
 	"os/exec"
 	"strconv"
 
-	"github.com/belay-sh/belay/internal/compose"
-	"github.com/belay-sh/belay/internal/engine"
+	"github.com/El-Mundos/belay/internal/compose"
+	"github.com/El-Mundos/belay/internal/engine"
 )
 
 // Local drives docker compose on the machine it runs on.

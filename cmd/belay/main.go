@@ -11,13 +11,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/belay-sh/belay/internal/agent"
-	"github.com/belay-sh/belay/internal/compose"
-	"github.com/belay-sh/belay/internal/engine"
-	"github.com/belay-sh/belay/internal/health"
-	"github.com/belay-sh/belay/internal/registry"
-	"github.com/belay-sh/belay/internal/server"
-	"github.com/belay-sh/belay/internal/version"
+	"github.com/El-Mundos/belay/internal/agent"
+	"github.com/El-Mundos/belay/internal/compose"
+	"github.com/El-Mundos/belay/internal/discover"
+	"github.com/El-Mundos/belay/internal/engine"
+	"github.com/El-Mundos/belay/internal/health"
+	"github.com/El-Mundos/belay/internal/registry"
+	"github.com/El-Mundos/belay/internal/server"
+	"github.com/El-Mundos/belay/internal/version"
 )
 
 func usage() {
@@ -73,12 +74,25 @@ func runServer(args []string) {
 	fs.Parse(args)
 
 	var pl []server.Project
-	for i, p := range projects {
-		file, err := compose.FileFor(p)
-		if err != nil {
-			fatal(err)
+	if len(projects) > 0 {
+		// explicit projects
+		for i, p := range projects {
+			file, err := compose.FileFor(p)
+			if err != nil {
+				fatal(err)
+			}
+			pl = append(pl, server.Project{ID: i, Name: filepath.Base(filepath.Dir(file)), File: file})
 		}
-		pl = append(pl, server.Project{ID: i, Name: filepath.Base(filepath.Dir(file)), File: file})
+	} else {
+		// auto-discover running compose stacks from the Docker daemon
+		found, err := discover.RunningProjects(context.Background())
+		if err != nil {
+			fatal(fmt.Errorf("auto-discover docker projects (is the docker socket available?): %w", err))
+		}
+		for i, d := range found {
+			pl = append(pl, server.Project{ID: i, Name: d.Name, File: d.File})
+		}
+		fmt.Fprintf(os.Stderr, "auto-discovered %d compose project(s) from Docker\n", len(found))
 	}
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,

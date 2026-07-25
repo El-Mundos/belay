@@ -16,13 +16,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/belay-sh/belay/internal/agent"
-	"github.com/belay-sh/belay/internal/compose"
-	"github.com/belay-sh/belay/internal/engine"
-	"github.com/belay-sh/belay/internal/health"
-	"github.com/belay-sh/belay/internal/registry"
-	"github.com/belay-sh/belay/internal/store"
-	"github.com/belay-sh/belay/web"
+	"github.com/El-Mundos/belay/internal/agent"
+	"github.com/El-Mundos/belay/internal/compose"
+	"github.com/El-Mundos/belay/internal/engine"
+	"github.com/El-Mundos/belay/internal/health"
+	"github.com/El-Mundos/belay/internal/registry"
+	"github.com/El-Mundos/belay/internal/store"
+	"github.com/El-Mundos/belay/web"
 )
 
 type Project struct {

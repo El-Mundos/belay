@@ -52,6 +52,30 @@ One binary, two roles:
   token-authenticated WebSocket (works through NAT/firewalls, no inbound ports; TLS by default,
   skippable on trusted networks like a WireGuard tunnel).
 
+## Quick start
+
+```bash
+docker build -t belay .
+
+# auto-discovers your running compose stacks via the Docker socket — no config needed
+docker run -d --name belay \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /srv:/srv \                       # your compose files, so it can edit + git-commit them
+  -p 127.0.0.1:8080:8080 \
+  belay server --addr 0.0.0.0:8080
+# then open http://127.0.0.1:8080
+```
+
+Or the CLI:
+
+```bash
+belay check  ./mystack                              # what's outdated?
+belay update ./mystack grafana grafana/grafana-oss:13.1.0   # safe update + auto-rollback
+```
+
+Gate it behind your reverse-proxy SSO with `--forward-header X-authentik-username`, or use the
+built-in login with `--password` / `BELAY_PASSWORD`.
+
 ## Design decisions (locked)
 
 - **Language:** Go — single static binary, tiny image.
