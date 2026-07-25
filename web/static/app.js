@@ -1,6 +1,6 @@
-// Belay UI: a styled confirm modal (replacing the browser's) + client-side service search.
+// Belay UI: a styled confirm modal (with optional changelog link) + client-side service search.
 (function () {
-  function modal(question, onOK) {
+  function modal(question, onOK, changelog) {
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
     ov.innerHTML =
@@ -11,6 +11,15 @@
       '<button class="btn" data-ok>Update</button>' +
       "</div></div>";
     ov.querySelector(".modal-q").textContent = question;
+    if (changelog) {
+      const a = document.createElement("a"); // built via DOM (no innerHTML injection)
+      a.className = "modal-link";
+      a.href = changelog;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = "View changelog ↗";
+      ov.querySelector(".modal-q").after(a);
+    }
     document.body.appendChild(ov);
     const close = () => ov.remove();
     ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
@@ -21,11 +30,12 @@
     ov.querySelector("[data-ok]").focus();
   }
 
-  // Per-service Update buttons set hx-confirm — route that through our modal instead of window.confirm.
+  // Per-service Update buttons set hx-confirm — route that through our modal, with the changelog link.
   document.addEventListener("htmx:confirm", function (e) {
     if (!e.detail.question) return;
     e.preventDefault();
-    modal(e.detail.question, () => e.detail.issueRequest(true));
+    const cl = e.detail.elt && e.detail.elt.getAttribute("data-changelog");
+    modal(e.detail.question, () => e.detail.issueRequest(true), cl);
   });
 
   // "Update all" is a plain form; confirm via the same modal.

@@ -69,6 +69,8 @@ pre { background:#0a0c10; color:#cdd3e0; padding:10px; border-radius:6px; overfl
   align-items:center; justify-content:center; z-index:50; animation:fade .12s ease; }
 .modal { background:var(--panel); border:1px solid var(--line); border-radius:12px;
   padding:22px; max-width:420px; width:calc(100% - 40px); box-shadow:0 16px 40px rgba(0,0,0,.4); }
-.modal-q { margin:0 0 18px; line-height:1.5; }
+.modal-q { margin:0 0 12px; line-height:1.5; }
+.modal-link { display:inline-block; margin:0 0 16px; font-size:13px; }
+.changelog { margin-left:10px; font-size:12px; color:var(--accent); }
 .modal-actions { display:flex; justify-content:flex-end; gap:10px; }
 @keyframes fade { from { opacity:0 } to { opacity:1 } }

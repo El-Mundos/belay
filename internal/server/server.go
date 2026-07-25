@@ -235,6 +235,9 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		view["Latest"] = latest
 		view["Count"] = len(newer)
 		view["Target"] = strings.TrimSuffix(image, ":"+ref.Tag) + ":" + latest
+		if src, e := s.reg.SourceRepo(r.Context(), ref); e == nil && src != "" {
+			view["Changelog"] = registry.ChangelogURL(src, latest)
+		}
 	}
 	s.render(w, "status", view)
 }

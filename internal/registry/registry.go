@@ -188,6 +188,110 @@ func (c *Client) nextLink(ref Ref, link string) string {
 	return fmt.Sprintf("%s://%s%s", c.Scheme, ref.Registry, p)
 }
 
+// SourceRepo returns the image's source repository from its OCI `org.opencontainers.image.source`
+// label (empty string if the image doesn't set one). Best-effort: it fetches the manifest, follows
+// a multi-arch index to a concrete manifest, then reads the config blob's labels.
+func (c *Client) SourceRepo(ctx context.Context, ref Ref) (string, error) {
+	const accept = "application/vnd.oci.image.index.v1+json," +
+		"application/vnd.docker.distribution.manifest.list.v2+json," +
+		"application/vnd.oci.image.manifest.v1+json," +
+		"application/vnd.docker.distribution.manifest.v2+json"
+	token := ""
+	man, ct, err := c.registryGet(ctx, ref, "/manifests/"+ref.Tag, accept, &token)
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(ct, "index") || strings.Contains(ct, "list") {
+		var idx struct {
+			Manifests []struct {
+				Digest   string                        `json:"digest"`
+				Platform struct{ Architecture string } `json:"platform"`
+			} `json:"manifests"`
+		}
+		json.Unmarshal(man, &idx)
+		dig := ""
+		for _, m := range idx.Manifests {
+			if m.Platform.Architecture == "amd64" {
+				dig = m.Digest
+				break
+			}
+		}
+		if dig == "" && len(idx.Manifests) > 0 {
+			dig = idx.Manifests[0].Digest
+		}
+		if dig == "" {
+			return "", nil
+		}
+		if man, _, err = c.registryGet(ctx, ref, "/manifests/"+dig, accept, &token); err != nil {
+			return "", err
+		}
+	}
+	var m struct {
+		Config struct{ Digest string } `json:"config"`
+	}
+	json.Unmarshal(man, &m)
+	if m.Config.Digest == "" {
+		return "", nil
+	}
+	blob, _, err := c.registryGet(ctx, ref, "/blobs/"+m.Config.Digest, "*/*", &token)
+	if err != nil {
+		return "", err
+	}
+	var cfg struct {
+		Config struct{ Labels map[string]string } `json:"config"`
+	}
+	json.Unmarshal(blob, &cfg)
+	return cfg.Config.Labels["org.opencontainers.image.source"], nil
+}
+
+// registryGet does an authenticated GET against /v2/<repo><path>, handling the bearer-token dance.
+func (c *Client) registryGet(ctx context.Context, ref Ref, path, accept string, token *string) ([]byte, string, error) {
+	url := fmt.Sprintf("%s://%s/v2/%s%s", c.Scheme, ref.Registry, ref.Repository, path)
+	for {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		if *token != "" {
+			req.Header.Set("Authorization", "Bearer "+*token)
+		}
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return nil, "", err
+		}
+		if resp.StatusCode == http.StatusUnauthorized && *token == "" {
+			ch := parseChallenge(resp.Header.Get("WWW-Authenticate"))
+			resp.Body.Close()
+			if *token, err = c.token(ctx, ch); err != nil {
+				return nil, "", err
+			}
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+			return nil, "", fmt.Errorf("%s%s: %s: %s", ref.Repository, path, resp.Status, strings.TrimSpace(string(b)))
+		}
+		body, err := io.ReadAll(resp.Body)
+		return body, resp.Header.Get("Content-Type"), err
+	}
+}
+
+// ChangelogURL turns a source repo + tag into a best-effort release-notes link.
+func ChangelogURL(sourceRepo, tag string) string {
+	s := strings.TrimSuffix(strings.TrimSpace(sourceRepo), ".git")
+	switch {
+	case s == "":
+		return ""
+	case strings.Contains(s, "github.com"):
+		return s + "/releases/tag/" + tag
+	case strings.Contains(s, "gitlab"):
+		return s + "/-/releases/" + tag
+	default:
+		return s
+	}
+}
+
 var challengeRe = regexp.MustCompile(`(\w+)="([^"]*)"`)
 
 func parseChallenge(h string) map[string]string {
