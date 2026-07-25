@@ -20,6 +20,7 @@ import (
 	"github.com/El-Mundos/belay/internal/compose"
 	"github.com/El-Mundos/belay/internal/engine"
 	"github.com/El-Mundos/belay/internal/health"
+	"github.com/El-Mundos/belay/internal/notify"
 	"github.com/El-Mundos/belay/internal/registry"
 	"github.com/El-Mundos/belay/internal/store"
 	"github.com/El-Mundos/belay/web"
@@ -36,18 +37,20 @@ type Config struct {
 	Projects      []Project
 	Password      string
 	ForwardHeader string
+	NotifyWebhook string
 	Timeout       time.Duration
 	MinUptime     time.Duration
 }
 
 type Server struct {
-	cfg   Config
-	reg   *registry.Client
-	eng   *engine.Engine
-	store *store.Store
-	tpl   map[string]*template.Template
-	mu    sync.Mutex
-	sess  map[string]struct{}
+	cfg    Config
+	reg    *registry.Client
+	eng    *engine.Engine
+	store  *store.Store
+	notify *notify.Notifier
+	tpl    map[string]*template.Template
+	mu     sync.Mutex
+	sess   map[string]struct{}
 }
 
 func New(cfg Config) *Server {
@@ -62,10 +65,11 @@ func New(cfg Config) *Server {
 		return template.Must(template.New("").Funcs(funcs).ParseFS(web.FS, files...))
 	}
 	return &Server{
-		cfg:   cfg,
-		reg:   registry.New(),
-		eng:   &engine.Engine{Deployer: agent.Local{}, Health: health.Gate{Timeout: cfg.Timeout, MinUptime: cfg.MinUptime}},
-		store: store.New(),
+		cfg:    cfg,
+		reg:    registry.New(),
+		eng:    &engine.Engine{Deployer: agent.Local{}, Health: health.Gate{Timeout: cfg.Timeout, MinUptime: cfg.MinUptime}},
+		store:  store.New(),
+		notify: notify.New(cfg.NotifyWebhook),
 		tpl: map[string]*template.Template{
 			"dashboard": page("templates/layout.html", "templates/dashboard.html"),
 			"failed":    page("templates/layout.html", "templates/failed.html"),
@@ -314,6 +318,12 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 		Outcome: string(res.Outcome), Err: errStr, Logs: strings.TrimSpace(res.Logs),
 		Duration: res.Duration.Round(time.Millisecond).String(),
 	})
+	if res.Outcome == engine.OutcomeRolledBack || res.Outcome == engine.OutcomeError {
+		s.notify.Failure(notify.Event{
+			Project: p.Name, Service: service, From: current, To: target,
+			Outcome: string(res.Outcome), Error: errStr, Logs: strings.TrimSpace(res.Logs),
+		})
+	}
 	return res, current
 }
 

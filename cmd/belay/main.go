@@ -69,6 +69,7 @@ func runServer(args []string) {
 	fs.Var(&projects, "project", "compose project path (file or dir); repeatable")
 	password := fs.String("password", os.Getenv("BELAY_PASSWORD"), "built-in login password (env BELAY_PASSWORD)")
 	forward := fs.String("forward-header", os.Getenv("BELAY_FORWARD_HEADER"), "trusted reverse-proxy user header (e.g. X-authentik-username)")
+	notifyURL := fs.String("notify-webhook", os.Getenv("BELAY_NOTIFY_WEBHOOK"), "webhook URL to POST on failed updates (ntfy/Discord/Slack/…)")
 	timeout := fs.Duration("timeout", 90*time.Second, "health-gate timeout")
 	minUptime := fs.Duration("min-uptime", 10*time.Second, "stayed-running window when the image has no healthcheck")
 	fs.Parse(args)
@@ -97,7 +98,7 @@ func runServer(args []string) {
 	}
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
-		Timeout: *timeout, MinUptime: *minUptime,
+		NotifyWebhook: *notifyURL, Timeout: *timeout, MinUptime: *minUptime,
 	})
 	if err := srv.Run(); err != nil {
 		fatal(err)
