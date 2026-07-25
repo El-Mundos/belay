@@ -1,0 +1,47 @@
+# Production-safe Belay deployment.
+#
+# Belay talks to a SCOPED docker-socket-proxy, never the raw Docker socket — the same hardening
+# Portainer recommends. The proxy only exposes the API endpoints you enable.
+#   - POST=1  -> Belay can apply updates (recreate containers).
+#   - POST=0  -> read-only install: discovery + update checks only, cannot change anything.
+# Gate the UI behind your reverse-proxy SSO (forward-auth) or set BELAY_PASSWORD.
+services:
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1   # list stacks (auto-discovery)
+      IMAGES: 1
+      NETWORKS: 1
+      POST: 1         # required to APPLY updates; set 0 for a read-only install
+      EXEC: 0
+      VOLUMES: 0
+      INFO: 0
+      SECRETS: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [belay-internal]
+
+  belay:
+    image: ghcr.io/el-mundos/belay:latest   # or `build: ..` to build from source
+    restart: unless-stopped
+    command: server --addr 0.0.0.0:8080
+    environment:
+      DOCKER_HOST: tcp://socket-proxy:2375
+      # Gate the UI — EITHER trust your reverse proxy's SSO header…
+      BELAY_FORWARD_HEADER: X-authentik-username
+      # …OR use the built-in login:  BELAY_PASSWORD: change-me
+    volumes:
+      - /srv:/srv          # your compose files: Belay edits the tag in place + git-commits it
+    depends_on: [socket-proxy]
+    networks: [belay-internal, proxy]
+    # Expose via your reverse proxy, e.g. Traefik:
+    # labels:
+    #   - traefik.enable=true
+    #   - "traefik.http.routers.belay.rule=Host(`belay.example.com`)"
+    #   - traefik.http.services.belay.loadbalancer.server.port=8080
+
+networks:
+  belay-internal:
+  proxy:
+    external: true

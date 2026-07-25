@@ -87,12 +87,13 @@ func runServer(args []string) {
 		// auto-discover running compose stacks from the Docker daemon
 		found, err := discover.RunningProjects(context.Background())
 		if err != nil {
-			fatal(fmt.Errorf("auto-discover docker projects (is the docker socket available?): %w", err))
+			fmt.Fprintf(os.Stderr, "warning: docker auto-discovery failed (%v); starting with no projects\n", err)
+		} else {
+			for i, d := range found {
+				pl = append(pl, server.Project{ID: i, Name: d.Name, File: d.File})
+			}
+			fmt.Fprintf(os.Stderr, "auto-discovered %d compose project(s) from Docker\n", len(found))
 		}
-		for i, d := range found {
-			pl = append(pl, server.Project{ID: i, Name: d.Name, File: d.File})
-		}
-		fmt.Fprintf(os.Stderr, "auto-discovered %d compose project(s) from Docker\n", len(found))
 	}
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
