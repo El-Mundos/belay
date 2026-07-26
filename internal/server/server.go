@@ -38,6 +38,7 @@ type Config struct {
 	Password      string
 	ForwardHeader string
 	NotifyWebhook string
+	Snapshot      bool
 	Timeout       time.Duration
 	MinUptime     time.Duration
 }
@@ -64,10 +65,14 @@ func New(cfg Config) *Server {
 	page := func(files ...string) *template.Template {
 		return template.Must(template.New("").Funcs(funcs).ParseFS(web.FS, files...))
 	}
+	eng := &engine.Engine{Deployer: agent.Local{}, Health: health.Gate{Timeout: cfg.Timeout, MinUptime: cfg.MinUptime}}
+	if cfg.Snapshot {
+		eng.Snapshot = agent.Snapshotter{} // snapshot volumes -> restore data on rollback
+	}
 	return &Server{
 		cfg:    cfg,
 		reg:    registry.New(),
-		eng:    &engine.Engine{Deployer: agent.Local{}, Health: health.Gate{Timeout: cfg.Timeout, MinUptime: cfg.MinUptime}},
+		eng:    eng,
 		store:  store.New(),
 		notify: notify.New(cfg.NotifyWebhook),
 		tpl: map[string]*template.Template{

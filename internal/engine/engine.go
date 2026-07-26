@@ -59,10 +59,20 @@ type HealthGate interface {
 	Wait(ctx context.Context, r Request) error
 }
 
-// Engine performs safe updates: deploy, health-gate, and roll back on failure.
+// Snapshotter snapshots a service's volumes before an update so a rollback restores DATA, not just
+// the image tag. Optional: a nil Snapshotter means image-only rollback. Snapshot returns an opaque
+// id ("" if nothing to snapshot); Restore puts the data back; Discard cleans up.
+type Snapshotter interface {
+	Snapshot(ctx context.Context, r Request) (string, error)
+	Restore(ctx context.Context, r Request, snapshot string) error
+	Discard(ctx context.Context, r Request, snapshot string)
+}
+
+// Engine performs safe updates: snapshot, deploy, health-gate, and roll back (image + data) on failure.
 type Engine struct {
 	Deployer Deployer
 	Health   HealthGate
+	Snapshot Snapshotter // optional; when set, volumes are snapshotted and restored on rollback
 }
 
 // SafeUpdate runs the core loop for one service and never leaves it broken:
@@ -79,37 +89,56 @@ func (e *Engine) SafeUpdate(ctx context.Context, r Request) Result {
 		return finish(OutcomeSkipped, nil)
 	}
 
+	// 0. snapshot the service's volumes so a rollback can restore data too
+	snap := ""
+	if e.Snapshot != nil {
+		snap, _ = e.Snapshot.Snapshot(ctx, r)
+	}
+
 	// 1. move to the new tag and bring it up
 	if err := e.Deployer.SetImage(ctx, r, r.ToImage); err != nil {
+		e.discard(ctx, r, snap)
 		return finish(OutcomeError, err)
 	}
 	if err := e.Deployer.Up(ctx, r); err != nil {
-		return e.rollback(ctx, r, &res, start, err) // couldn't even start -> revert
+		return e.rollback(ctx, r, &res, start, err, snap) // couldn't even start -> revert
 	}
 
 	// 2. health gate
 	if err := e.Health.Wait(ctx, r); err != nil {
-		return e.rollback(ctx, r, &res, start, err)
+		return e.rollback(ctx, r, &res, start, err, snap)
 	}
 
+	e.discard(ctx, r, snap)
 	return finish(OutcomeUpdated, nil)
 }
 
-// rollback captures logs (before reverting, so the user sees why it failed), restores the previous
-// image, and reports. If the rollback itself fails, that's an OutcomeError — the one case that needs
-// a human now.
-func (e *Engine) rollback(ctx context.Context, r Request, res *Result, start time.Time, cause error) Result {
+func (e *Engine) discard(ctx context.Context, r Request, snap string) {
+	if e.Snapshot != nil && snap != "" {
+		e.Snapshot.Discard(ctx, r, snap)
+	}
+}
+
+// rollback captures logs, restores the previous image AND (if snapshotted) the volume data, and
+// reports. If the rollback itself fails, that's an OutcomeError — the one case that needs a human now.
+func (e *Engine) rollback(ctx context.Context, r Request, res *Result, start time.Time, cause error, snap string) Result {
+	fail := func(err error) Result {
+		res.Outcome, res.Err, res.Duration = OutcomeError, err, time.Since(start)
+		return *res
+	}
 	if logs, err := e.Deployer.Logs(ctx, r, 200); err == nil {
 		res.Logs = logs
 	}
+	if e.Snapshot != nil && snap != "" {
+		e.Snapshot.Restore(ctx, r, snap) // restores volume data (stops the service first)
+	}
 	if err := e.Deployer.SetImage(ctx, r, r.FromImage); err != nil {
-		res.Outcome, res.Err, res.Duration = OutcomeError, err, time.Since(start)
-		return *res
+		return fail(err)
 	}
 	if err := e.Deployer.Up(ctx, r); err != nil {
-		res.Outcome, res.Err, res.Duration = OutcomeError, err, time.Since(start)
-		return *res
+		return fail(err)
 	}
+	e.discard(ctx, r, snap)
 	res.Outcome, res.Err, res.Duration = OutcomeRolledBack, cause, time.Since(start)
 	return *res
 }

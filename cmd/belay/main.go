@@ -70,6 +70,7 @@ func runServer(args []string) {
 	password := fs.String("password", os.Getenv("BELAY_PASSWORD"), "built-in login password (env BELAY_PASSWORD)")
 	forward := fs.String("forward-header", os.Getenv("BELAY_FORWARD_HEADER"), "trusted reverse-proxy user header (e.g. X-authentik-username)")
 	notifyURL := fs.String("notify-webhook", os.Getenv("BELAY_NOTIFY_WEBHOOK"), "webhook URL to POST on failed updates (ntfy/Discord/Slack/…)")
+	snapshot := fs.Bool("snapshot", true, "snapshot volumes before updating and restore data on rollback")
 	timeout := fs.Duration("timeout", 90*time.Second, "health-gate timeout")
 	minUptime := fs.Duration("min-uptime", 10*time.Second, "stayed-running window when the image has no healthcheck")
 	fs.Parse(args)
@@ -98,7 +99,7 @@ func runServer(args []string) {
 	}
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
-		NotifyWebhook: *notifyURL, Timeout: *timeout, MinUptime: *minUptime,
+		NotifyWebhook: *notifyURL, Snapshot: *snapshot, Timeout: *timeout, MinUptime: *minUptime,
 	})
 	if err := srv.Run(); err != nil {
 		fatal(err)
@@ -151,6 +152,7 @@ func runUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	timeout := fs.Duration("timeout", 60*time.Second, "overall health-gate timeout")
 	minUptime := fs.Duration("min-uptime", 10*time.Second, "stayed-running window when the image has no healthcheck")
+	snapshot := fs.Bool("snapshot", true, "snapshot volumes before updating and restore data on rollback")
 	noCommit := fs.Bool("no-commit", false, "do not git-commit the change even if the compose dir is a repo")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: belay update [flags] <compose-file|dir> <service> <new-image>")
@@ -176,6 +178,9 @@ func runUpdate(args []string) {
 	e := &engine.Engine{
 		Deployer: agent.Local{},
 		Health:   health.Gate{Timeout: *timeout, MinUptime: *minUptime},
+	}
+	if *snapshot {
+		e.Snapshot = agent.Snapshotter{}
 	}
 	res := e.SafeUpdate(context.Background(), engine.Request{
 		Project: project, Service: service, FromImage: current, ToImage: newImage,

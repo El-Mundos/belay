@@ -84,6 +84,43 @@ func TestSafeUpdate_FailedStartRollsBack(t *testing.T) {
 	}
 }
 
+type fakeSnap struct{ snapshotted, restored, discarded bool }
+
+func (f *fakeSnap) Snapshot(context.Context, Request) (string, error) {
+	f.snapshotted = true
+	return "s1", nil
+}
+func (f *fakeSnap) Restore(context.Context, Request, string) error { f.restored = true; return nil }
+func (f *fakeSnap) Discard(context.Context, Request, string)       { f.discarded = true }
+
+func TestSafeUpdate_SnapshotDiscardedOnSuccess(t *testing.T) {
+	d := &fakeDeployer{current: "app:1.0"}
+	fs := &fakeSnap{}
+	e := &Engine{Deployer: d, Health: fakeGate{healthy: true}, Snapshot: fs}
+	if res := e.SafeUpdate(context.Background(), req()); res.Outcome != OutcomeUpdated {
+		t.Fatalf("outcome = %q", res.Outcome)
+	}
+	if !fs.snapshotted || !fs.discarded || fs.restored {
+		t.Fatalf("snapshot=%v discard=%v restore=%v (want snapshot+discard, no restore)", fs.snapshotted, fs.discarded, fs.restored)
+	}
+}
+
+func TestSafeUpdate_VolumeRestoredOnRollback(t *testing.T) {
+	d := &fakeDeployer{current: "app:1.0", logs: "boom"}
+	fs := &fakeSnap{}
+	e := &Engine{Deployer: d, Health: fakeGate{healthy: false}, Snapshot: fs}
+	res := e.SafeUpdate(context.Background(), req())
+	if res.Outcome != OutcomeRolledBack {
+		t.Fatalf("outcome = %q, want rolled_back", res.Outcome)
+	}
+	if !fs.restored {
+		t.Fatal("volume data was NOT restored on rollback")
+	}
+	if d.current != "app:1.0" {
+		t.Fatalf("image not reverted: %q", d.current)
+	}
+}
+
 func TestSafeUpdate_SameImageSkips(t *testing.T) {
 	d := &fakeDeployer{current: "app:1.0"}
 	e := &Engine{Deployer: d, Health: fakeGate{healthy: true}}
