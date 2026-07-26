@@ -12,11 +12,14 @@
 <body>
 <header>
   <div class="brand">⚓ <b>Belay</b> <span class="sub">safe compose updates</span></div>
-  {{if .User}}<div class="user">{{.User}} · <a href="/logout">log out</a></div>{{end}}
+  <div class="head-right">
+    {{if .Active}}<a class="settings-link {{if eq .Active "settings"}}on{{end}}" href="/settings">⚙ Settings</a>{{end}}
+    {{if .User}}<span class="user">{{.User}} · <a href="/logout">log out</a></span>{{end}}
+  </div>
 </header>
 {{if .Active}}
 <nav class="tabs">
-  <a href="/" class="{{if eq .Active "updates"}}on{{end}}">Updates</a>
+  <a href="/" class="{{if eq .Active "updates"}}on{{end}}">Updates{{if .Pending}} <span class="badge badge-upd">{{.Pending}}</span>{{end}}</a>
   <a href="/failed" class="{{if eq .Active "failed"}}on{{end}}">Failed{{if .FailedCount}} <span class="badge">{{.FailedCount}}</span>{{end}}</a>
   <a href="/history" class="{{if eq .Active "history"}}on{{end}}">History</a>
 </nav>
@@ -24,5 +27,18 @@
 <main>
 {{block "content" .}}{{end}}
 </main>
+
+{{if .Active}}
+<!-- browser-downloads-style live Activity tray -->
+<button id="tray-toggle" class="tray-toggle" onclick="belayToggleTray()">
+  ⭳ Activity{{if .ActiveJobs}} <span class="badge badge-run">{{.ActiveJobs}}</span>{{end}}
+</button>
+<div id="activity-tray" class="tray hidden">
+  <div class="tray-head"><span>⭳ Activity</span><button class="x" onclick="belayToggleTray()">✕</button></div>
+  <div id="activity-body" hx-get="/activity" hx-trigger="load, every 2s" hx-swap="innerHTML">
+    <p class="muted">Loading…</p>
+  </div>
+</div>
+{{end}}
 </body>
 </html>

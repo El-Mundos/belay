@@ -10,10 +10,10 @@
 <section class="project">
   <h2>{{$p.Name}} <span class="path">{{$p.File}}</span></h2>
   <table>
-    <thead><tr><th>service</th><th>current image</th><th>status</th></tr></thead>
+    <thead><tr><th>service</th><th>current image</th><th>status</th><th></th></tr></thead>
     <tbody>
     {{range .Services}}
-      <tr id="row-{{$p.ID}}-{{.Name}}">
+      <tr id="row-{{$p.ID}}-{{.Name}}" class="{{if .Pinned}}pinned{{end}}">
         <td class="svc">{{.Name}}</td>
         <td class="mono">{{if .Image}}{{.Image}}{{else}}<span class="muted">(build-only)</span>{{end}}</td>
         {{if .Image}}
@@ -21,6 +21,13 @@
           <span class="muted">checking…</span>
         </td>
         {{else}}<td class="muted">—</td>{{end}}
+        <td class="pincell">
+          <button class="btn ghost {{if .Pinned}}pinned-on{{end}}" hx-post="/pin"
+                  hx-vals='{"p":"{{$p.ID}}","s":"{{.Name}}","pinned":"{{if .Pinned}}0{{else}}1{{end}}"}'
+                  hx-swap="outerHTML" title="Pinned services are skipped by update-all and auto-check">
+            {{if .Pinned}}📌 pinned{{else}}📌 pin{{end}}
+          </button>
+        </td>
       </tr>
     {{end}}
     </tbody>

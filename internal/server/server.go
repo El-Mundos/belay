@@ -18,12 +18,14 @@ import (
 
 	"github.com/El-Mundos/belay/internal/agent"
 	"github.com/El-Mundos/belay/internal/compose"
+	"github.com/El-Mundos/belay/internal/config"
 	"github.com/El-Mundos/belay/internal/engine"
 	"github.com/El-Mundos/belay/internal/health"
 	"github.com/El-Mundos/belay/internal/notify"
 	"github.com/El-Mundos/belay/internal/registry"
 	"github.com/El-Mundos/belay/internal/store"
 	"github.com/El-Mundos/belay/web"
+	"path/filepath"
 )
 
 type Project struct {
@@ -41,7 +43,8 @@ type Config struct {
 	Snapshot       bool
 	Timeout        time.Duration
 	MinUptime      time.Duration
-	RollbackWindow time.Duration // how long a successful update stays manually roll-back-able (0 = off)
+	RollbackWindow time.Duration // seed for a fresh install; the settings page owns it thereafter
+	DataDir        string        // where settings.json + store.json live ("" = in-memory only)
 }
 
 type Server struct {
@@ -49,10 +52,20 @@ type Server struct {
 	reg    *registry.Client
 	eng    *engine.Engine
 	store  *store.Store
+	set    *config.Store
 	notify *notify.Notifier
 	tpl    map[string]*template.Template
 	mu     sync.Mutex
 	sess   map[string]struct{}
+	checks map[string]checkResult // auto-check cache, key project\x00service
+	jobs   *jobManager            // live activity panel (SSE)
+}
+
+// checkResult is a cached "is there a newer version" answer from auto-check.
+type checkResult struct {
+	Latest, Target, Changelog, Err string
+	Count                          int
+	When                           time.Time
 }
 
 func New(cfg Config) *Server {
@@ -62,14 +75,39 @@ func New(cfg Config) *Server {
 	if cfg.MinUptime == 0 {
 		cfg.MinUptime = 10 * time.Second
 	}
-	if cfg.RollbackWindow == 0 {
-		cfg.RollbackWindow = 24 * time.Hour
+
+	// settings + persistent record store live under DataDir; seed a fresh install from flags/env
+	storePath, setPath := "", ""
+	if cfg.DataDir != "" {
+		storePath = filepath.Join(cfg.DataDir, "store.json")
+		setPath = filepath.Join(cfg.DataDir, "settings.json")
 	}
+	set, loaded := config.Open(setPath)
+	if !loaded {
+		_ = set.Update(func(s *config.Settings) {
+			if cfg.RollbackWindow > 0 {
+				s.RollbackWindowHours = int(cfg.RollbackWindow / time.Hour)
+			}
+			if cfg.NotifyWebhook != "" {
+				s.Notify.URL = cfg.NotifyWebhook
+			}
+		})
+	}
+
 	funcs := template.FuncMap{"sub": func(a, b int) int { return a - b }}
 	page := func(files ...string) *template.Template {
 		return template.Must(template.New("").Funcs(funcs).ParseFS(web.FS, files...))
 	}
-	eng := &engine.Engine{Deployer: agent.Local{}, Health: health.Gate{Timeout: cfg.Timeout, MinUptime: cfg.MinUptime}}
+	// health ladder: docker HEALTHCHECK -> the service's configured probe (from settings) -> stayed-running
+	gate := health.Gate{
+		Timeout:   cfg.Timeout,
+		MinUptime: cfg.MinUptime,
+		ProbeFor: func(r engine.Request) (health.Probe, bool) {
+			p, ok := set.ProbeFor(r.Project, r.Service)
+			return health.Probe{Type: p.Type, Target: p.Target, Expect: p.Expect}, ok
+		},
+	}
+	eng := &engine.Engine{Deployer: agent.Local{}, Health: gate}
 	if cfg.Snapshot {
 		eng.Snapshot = agent.Snapshotter{} // snapshot volumes -> restore data on rollback
 	}
@@ -77,17 +115,22 @@ func New(cfg Config) *Server {
 		cfg:    cfg,
 		reg:    registry.New(),
 		eng:    eng,
-		store:  store.New(),
-		notify: notify.New(cfg.NotifyWebhook),
+		store:  store.Open(storePath),
+		set:    set,
+		notify: notify.New(func() config.Notify { return set.Get().Notify }),
 		tpl: map[string]*template.Template{
 			"dashboard": page("templates/layout.html", "templates/dashboard.html"),
 			"failed":    page("templates/layout.html", "templates/failed.html"),
 			"history":   page("templates/layout.html", "templates/history.html"),
 			"login":     page("templates/layout.html", "templates/login.html"),
+			"settings":  page("templates/layout.html", "templates/settings.html"),
 			"status":    page("templates/status.html"),
 			"result":    page("templates/result.html"),
+			"activity":  page("templates/activity.html"),
 		},
-		sess: map[string]struct{}{},
+		sess:   map[string]struct{}{},
+		checks: map[string]checkResult{},
+		jobs:   newJobManager(),
 	}
 }
 
@@ -105,8 +148,15 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /update", s.guard(s.handleUpdate))
 	mux.HandleFunc("POST /update-all", s.guard(s.handleUpdateAll))
 	mux.HandleFunc("POST /rollback", s.guard(s.handleRollback))
+	mux.HandleFunc("GET /settings", s.guard(s.handleSettings))
+	mux.HandleFunc("POST /settings", s.guard(s.handleSaveSettings))
+	mux.HandleFunc("POST /settings/test", s.guard(s.handleTestNotify))
+	mux.HandleFunc("POST /pin", s.guard(s.handlePin))
+	mux.HandleFunc("GET /activity", s.guard(s.handleActivity))
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	go s.sweepRollbacks() // discard snapshots whose retention window has passed
+	go s.autoCheckLoop()  // periodic version checks (cache + notify), per settings
 
 	if !s.authEnabled() {
 		log.Printf("WARNING: no auth configured (set --password or --forward-header); bind to localhost only.")
@@ -180,12 +230,18 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // ---- shared page data ----
 
 func (s *Server) base(r *http.Request, active string) map[string]any {
-	return map[string]any{"User": s.user(r), "Active": active, "FailedCount": len(s.store.Failed())}
+	return map[string]any{
+		"User": s.user(r), "Active": active,
+		"FailedCount": s.store.FailedCount(), "ActiveJobs": s.jobs.active(), "Pending": s.pendingCount(),
+	}
 }
 
 // ---- tabs ----
 
-type svcView struct{ Name, Image string }
+type svcView struct {
+	Name, Image string
+	Pinned      bool
+}
 type projView struct {
 	ID       int
 	Name     string
@@ -203,7 +259,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 		pv := projView{ID: p.ID, Name: p.Name, File: p.File}
 		for _, sv := range services {
-			pv.Services = append(pv.Services, svcView{Name: sv.Name, Image: sv.Image})
+			pv.Services = append(pv.Services, svcView{Name: sv.Name, Image: sv.Image, Pinned: s.set.Pinned(p.File, sv.Name)})
 		}
 		projects = append(projects, pv)
 	}
@@ -376,8 +432,8 @@ func (s *Server) handleUpdateAll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, sv := range services {
-			if sv.Image == "" || !strings.Contains(sv.Image, ":") {
-				continue
+			if sv.Image == "" || !strings.Contains(sv.Image, ":") || s.set.Pinned(p.File, sv.Name) {
+				continue // skip build-only, untagged, and pinned services
 			}
 			ref := registry.ParseRef(sv.Image)
 			newer, comparable, err := s.reg.Newer(ctx, ref)
@@ -391,13 +447,21 @@ func (s *Server) handleUpdateAll(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// applyUpdate runs the safe-update engine for one service, commits on success, records the attempt.
+// applyUpdate runs the safe-update engine for one service, commits on success, records the attempt,
+// and surfaces the whole thing live in the Activity tray (with streamed logs).
 func (s *Server) applyUpdate(ctx context.Context, p Project, service, target string) (engine.Result, string) {
 	current, err := compose.FindImage(p.File, service)
 	if err != nil {
 		return engine.Result{Outcome: engine.OutcomeError, Err: err}, ""
 	}
+
+	job := s.jobs.start(p.Name, service, current, target)
+	logCtx, stopLogs := context.WithCancel(ctx)
+	go s.streamLogs(logCtx, p.File, service, job) // live progress in the Activity tray
+
 	res := s.eng.SafeUpdate(ctx, engine.Request{Project: p.File, Service: service, FromImage: current, ToImage: target})
+	stopLogs()
+
 	if res.Outcome == engine.OutcomeUpdated {
 		_ = compose.CommitIfRepo(p.File, fmt.Sprintf("belay: update %s %s -> %s", service, current, target))
 		s.retainRollback(ctx, p, service, current, target, res.Snapshot)
@@ -406,6 +470,7 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 	if res.Err != nil {
 		errStr = res.Err.Error()
 	}
+	s.jobs.finish(job, string(res.Outcome), strings.TrimSpace(res.Logs))
 	s.store.Add(store.Record{
 		Project: p.Name, Service: service, From: current, To: target,
 		Outcome: string(res.Outcome), Err: errStr, Logs: strings.TrimSpace(res.Logs),
@@ -424,7 +489,8 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 // point for the retention window, discarding any point it supersedes. If retention is off, it
 // discards the snapshot immediately.
 func (s *Server) retainRollback(ctx context.Context, p Project, service, from, to, snapshot string) {
-	if s.cfg.RollbackWindow <= 0 {
+	window := s.set.RollbackWindow()
+	if window <= 0 {
 		if s.eng.Snapshot != nil && snapshot != "" {
 			s.eng.Snapshot.Discard(ctx, engine.Request{Project: p.File, Service: service}, snapshot)
 		}
@@ -434,7 +500,7 @@ func (s *Server) retainRollback(ctx context.Context, p Project, service, from, t
 	old, had := s.store.SetRollback(store.RollbackPoint{
 		Project: p.Name, Service: service, File: p.File,
 		FromImage: from, ToImage: to, Snapshot: snapshot,
-		CreatedAt: now, ExpiresAt: now.Add(s.cfg.RollbackWindow),
+		CreatedAt: now, ExpiresAt: now.Add(window),
 	})
 	if had && old.Snapshot != "" && s.eng.Snapshot != nil {
 		s.eng.Snapshot.Discard(ctx, engine.Request{Project: old.File, Service: old.Service}, old.Snapshot)
@@ -467,7 +533,7 @@ func (s *Server) project(id string) (Project, bool) {
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	root := "layout.html"
-	if name == "status" || name == "result" {
+	if name == "status" || name == "result" || name == "activity" {
 		root = name
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

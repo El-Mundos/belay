@@ -1,0 +1,71 @@
+{{define "content"}}
+<h2 class="tabhead">Settings</h2>
+
+<form method="post" action="/settings" class="card">
+  <h3>Notifications</h3>
+  <label class="check"><input type="checkbox" name="notify_enabled" {{if .S.Notify.Enabled}}checked{{end}}> Enable notifications</label>
+  {{$k := .S.Notify.Kind}}
+  <label>Provider
+    <select name="notify_kind">
+      <option value="auto" {{if eq $k "auto"}}selected{{end}}>Auto-detect from URL</option>
+      <option value="ntfy" {{if eq $k "ntfy"}}selected{{end}}>ntfy</option>
+      <option value="discord" {{if eq $k "discord"}}selected{{end}}>Discord</option>
+      <option value="slack" {{if eq $k "slack"}}selected{{end}}>Slack</option>
+      <option value="gotify" {{if eq $k "gotify"}}selected{{end}}>Gotify</option>
+      <option value="generic" {{if eq $k "generic"}}selected{{end}}>Generic JSON</option>
+    </select>
+  </label>
+  <label>Webhook / topic URL
+    <input type="text" name="notify_url" value="{{.S.Notify.URL}}" placeholder="https://ntfy.sh/my-belay-topic">
+  </label>
+  <label class="check"><input type="checkbox" name="on_failure" {{if .S.Notify.OnFailure}}checked{{end}}> Notify on failed / rolled-back updates</label>
+  <label class="check"><input type="checkbox" name="on_new_version" {{if .S.Notify.OnNewVersion}}checked{{end}}> Notify when a new version is available</label>
+  <div class="actions">
+    <button class="btn" type="submit">Save</button>
+    <button class="btn ghost" type="button" hx-post="/settings/test" hx-target="#notify-test" hx-swap="innerHTML">Send test</button>
+    <span id="notify-test" class="mono"></span>
+  </div>
+</form>
+
+<form method="post" action="/settings" class="card">
+  <h3>Automation</h3>
+  <label>Auto-check for updates every
+    <input type="number" class="num" name="auto_check_hours" min="0" value="{{.S.AutoCheckHours}}"> hours
+    <span class="muted">(0 = off; caches results &amp; notifies on new versions)</span>
+  </label>
+  <label>Keep manual rollback available for
+    <input type="number" class="num" name="rollback_window_hours" min="0" value="{{.S.RollbackWindowHours}}"> hours
+    <span class="muted">(0 = off)</span>
+  </label>
+  <div class="actions"><button class="btn" type="submit">Save</button></div>
+</form>
+
+<form method="post" action="/settings" class="card">
+  <input type="hidden" name="section" value="probes">
+  <input type="hidden" name="n" value="{{.N}}">
+  <h3>Health probes</h3>
+  <p class="muted small">An extra "is it really up?" check for services with no Docker <code>HEALTHCHECK</code>
+  (e.g. wg-easy). If set, an update only counts as healthy once this endpoint responds — otherwise it
+  auto-rolls-back. The target must be reachable from the Belay container.</p>
+  <table class="probes">
+    <thead><tr><th>service</th><th>type</th><th>target</th><th>expect</th></tr></thead>
+    <tbody>
+    {{range .Services}}
+      <tr>
+        <td><span class="svc">{{.Service}}</span> <span class="muted small">{{.Project}}</span>
+          <input type="hidden" name="pid_{{.Idx}}" value="{{.PID}}">
+          <input type="hidden" name="svc_{{.Idx}}" value="{{.Service}}"></td>
+        <td><select name="ptype_{{.Idx}}">
+          <option value="none" {{if eq .Type ""}}selected{{end}}>none</option>
+          <option value="http" {{if eq .Type "http"}}selected{{end}}>http</option>
+          <option value="tcp" {{if eq .Type "tcp"}}selected{{end}}>tcp</option>
+        </select></td>
+        <td><input type="text" name="ptarget_{{.Idx}}" value="{{.Target}}" placeholder="http://svc:port/  or  host:port"></td>
+        <td><input type="number" class="num" name="pexpect_{{.Idx}}" value="{{.Expect}}" placeholder="200"></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <div class="actions"><button class="btn" type="submit">Save probes</button></div>
+</form>
+{{end}}

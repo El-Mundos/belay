@@ -4,6 +4,9 @@
 package store
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -41,11 +44,63 @@ type Store struct {
 	seq       int
 	max       int
 	rollbacks map[string]RollbackPoint // key: project + service
+	path      string                   // JSON file for persistence ("" = in-memory only)
 }
 
 func key(project, service string) string { return project + "\x00" + service }
 
 func New() *Store { return &Store{max: 500, rollbacks: map[string]RollbackPoint{}} }
+
+// Open is New plus loading any previously-persisted records + rollback points from path, and
+// saving future changes back to it. An empty path is in-memory only (same as New).
+func Open(path string) *Store {
+	s := New()
+	s.path = path
+	s.load()
+	return s
+}
+
+type persisted struct {
+	Seq       int                      `json:"seq"`
+	Recs      []Record                 `json:"recs"`
+	Rollbacks map[string]RollbackPoint `json:"rollbacks"`
+}
+
+func (s *Store) load() {
+	if s.path == "" {
+		return
+	}
+	b, err := os.ReadFile(s.path)
+	if err != nil {
+		return
+	}
+	var p persisted
+	if json.Unmarshal(b, &p) != nil {
+		return
+	}
+	s.seq, s.recs = p.Seq, p.Recs
+	if p.Rollbacks != nil {
+		s.rollbacks = p.Rollbacks
+	}
+}
+
+// save persists the current state; callers already hold s.mu.
+func (s *Store) save() {
+	if s.path == "" {
+		return
+	}
+	b, err := json.Marshal(persisted{Seq: s.seq, Recs: s.recs, Rollbacks: s.rollbacks})
+	if err != nil {
+		return
+	}
+	if dir := filepath.Dir(s.path); dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	tmp := s.path + ".tmp"
+	if os.WriteFile(tmp, b, 0o644) == nil {
+		_ = os.Rename(tmp, s.path)
+	}
+}
 
 // Add stamps and stores a record (newest kept, oldest dropped past max).
 func (s *Store) Add(r Record) {
@@ -58,6 +113,7 @@ func (s *Store) Add(r Record) {
 	if len(s.recs) > s.max {
 		s.recs = s.recs[len(s.recs)-s.max:]
 	}
+	s.save()
 }
 
 // Failed returns the most recent attempt for each service whose LATEST attempt failed
@@ -99,6 +155,17 @@ func (s *Store) Succeeded() []Record {
 	return out
 }
 
+// Totals counts all recorded attempts by outcome (for metrics).
+func (s *Store) Totals() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := map[string]int{}
+	for _, r := range s.recs {
+		m[r.Outcome]++
+	}
+	return m
+}
+
 // SetRollback stores/replaces the rollback point for a service and returns the previous point
 // (if any) so the caller can discard its now-superseded snapshot.
 func (s *Store) SetRollback(p RollbackPoint) (old RollbackPoint, had bool) {
@@ -107,6 +174,7 @@ func (s *Store) SetRollback(p RollbackPoint) (old RollbackPoint, had bool) {
 	k := key(p.Project, p.Service)
 	old, had = s.rollbacks[k]
 	s.rollbacks[k] = p
+	s.save()
 	return
 }
 
@@ -127,6 +195,7 @@ func (s *Store) TakeRollback(project, service string) (RollbackPoint, bool) {
 	p, ok := s.rollbacks[k]
 	if ok {
 		delete(s.rollbacks, k)
+		s.save()
 	}
 	return p, ok
 }
@@ -142,6 +211,9 @@ func (s *Store) SweepExpired(now time.Time) []RollbackPoint {
 			expired = append(expired, p)
 			delete(s.rollbacks, k)
 		}
+	}
+	if len(expired) > 0 {
+		s.save()
 	}
 	return expired
 }

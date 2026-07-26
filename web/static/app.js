@@ -51,4 +51,13 @@
       tr.style.display = tr.textContent.toLowerCase().indexOf(q) >= 0 ? "" : "none";
     });
   };
+
+  // Show/hide the live Activity tray (browser-downloads style).
+  window.belayToggleTray = function () {
+    const tray = document.getElementById("activity-tray");
+    const toggle = document.getElementById("tray-toggle");
+    if (!tray) return;
+    tray.classList.toggle("hidden");
+    if (toggle) toggle.style.display = tray.classList.contains("hidden") ? "" : "none";
+  };
 })();

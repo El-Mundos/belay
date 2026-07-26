@@ -73,7 +73,8 @@ func runServer(args []string) {
 	snapshot := fs.Bool("snapshot", true, "snapshot volumes before updating and restore data on rollback")
 	timeout := fs.Duration("timeout", 90*time.Second, "health-gate timeout")
 	minUptime := fs.Duration("min-uptime", 10*time.Second, "stayed-running window when the image has no healthcheck")
-	rollbackWindow := fs.Duration("rollback-window", 24*time.Hour, "how long a successful update stays manually roll-back-able (0 = off)")
+	rollbackWindow := fs.Duration("rollback-window", 24*time.Hour, "initial rollback retention window on a fresh install (settings page owns it after)")
+	dataDir := fs.String("data-dir", os.Getenv("BELAY_DATA_DIR"), "directory for persisted settings + history (env BELAY_DATA_DIR; empty = in-memory)")
 	fs.Parse(args)
 
 	var pl []server.Project
@@ -101,7 +102,7 @@ func runServer(args []string) {
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
 		NotifyWebhook: *notifyURL, Snapshot: *snapshot, Timeout: *timeout, MinUptime: *minUptime,
-		RollbackWindow: *rollbackWindow,
+		RollbackWindow: *rollbackWindow, DataDir: *dataDir,
 	})
 	if err := srv.Run(); err != nil {
 		fatal(err)

@@ -1,0 +1,21 @@
+{{define "activity"}}
+{{if not .Jobs}}<p class="muted">No recent updates.</p>{{end}}
+{{range .Jobs}}
+<div class="job job-{{.State}}">
+  <div class="job-head">
+    <span class="svc">{{.Service}}</span>
+    <span class="mono muted">{{.From}} → {{.To}}</span>
+    <span class="job-state">
+      {{if .Running}}<span class="spin">◌</span> updating… {{.Elapsed}}
+      {{else if eq .State "updated"}}<span class="ok">✅ updated</span>
+      {{else if eq .State "rolled_back"}}<span class="err">↩ rolled back</span>
+      {{else if eq .State "reverted"}}<span class="upd">↩ reverted</span>
+      {{else if eq .State "error"}}<span class="err">❌ error</span>
+      {{else if eq .State "skipped"}}<span class="muted">already up to date</span>
+      {{else}}<span class="muted">{{.State}}</span>{{end}}
+    </span>
+  </div>
+  {{if .Logs}}<details {{if .Running}}open{{end}}><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
+</div>
+{{end}}
+{{end}}

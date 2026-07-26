@@ -79,3 +79,51 @@ pre { background:#0a0c10; color:#cdd3e0; padding:10px; border-radius:6px; overfl
 .changelog { margin-left:10px; font-size:12px; color:var(--accent); }
 .modal-actions { display:flex; justify-content:flex-end; gap:10px; }
 @keyframes fade { from { opacity:0 } to { opacity:1 } }
+
+/* header right side + settings link */
+.head-right { display:flex; align-items:center; gap:16px; }
+.settings-link { color:var(--muted); font-size:13px; font-weight:600; }
+.settings-link.on, .settings-link:hover { color:var(--text); }
+.badge-upd { background:var(--upd); color:#1a1d26; }
+.badge-run { background:var(--accent); color:#fff; }
+
+/* settings cards */
+.card { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+  padding:18px 20px; margin-bottom:20px; }
+.card h3 { margin:0 0 14px; font-size:15px; }
+.card label { display:block; margin:10px 0; font-size:13.5px; color:var(--muted); }
+.card label.check { color:var(--text); }
+.card input[type=text], .card select, .card input[type=number] {
+  display:block; margin-top:5px; padding:8px 11px; border:1px solid var(--line);
+  border-radius:7px; background:var(--bg); color:var(--text); font-size:13.5px; min-width:min(420px,100%); }
+.card input.num { display:inline-block; width:6em; min-width:0; margin:0 4px; }
+.card label.check input, .card input[type=checkbox] { margin-right:7px; }
+.card .actions { margin-top:16px; display:flex; align-items:center; gap:12px; }
+.small { font-size:12px; } .card p.small { margin:0 0 12px; }
+table.probes input[type=text] { min-width:0; width:100%; }
+table.probes input.num { width:5em; }
+table.probes td { padding:7px 10px; }
+tr.pinned { opacity:.55; }
+.pincell { text-align:right; white-space:nowrap; }
+.pinned-on { color:var(--upd) !important; border-color:var(--upd) !important; }
+
+/* activity tray (browser-downloads style) */
+.tray-toggle { position:fixed; right:20px; bottom:20px; z-index:40; padding:9px 15px;
+  border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:22px;
+  font-size:13.5px; cursor:pointer; box-shadow:0 4px 16px rgba(0,0,0,.3); }
+.tray-toggle:hover { border-color:var(--accent); }
+.tray { position:fixed; right:20px; bottom:20px; z-index:41; width:min(440px,calc(100vw - 40px));
+  max-height:min(560px,80vh); display:flex; flex-direction:column; background:var(--panel);
+  border:1px solid var(--line); border-radius:12px; box-shadow:0 8px 34px rgba(0,0,0,.45); }
+.tray.hidden { display:none; }
+.tray-head { display:flex; align-items:center; justify-content:space-between; padding:12px 15px;
+  border-bottom:1px solid var(--line); font-weight:600; font-size:14px; }
+.tray-head .x { background:none; border:none; color:var(--muted); font-size:15px; cursor:pointer; }
+#activity-body { overflow:auto; padding:8px 12px 12px; }
+.job { border-bottom:1px solid var(--line); padding:10px 2px; }
+.job:last-child { border-bottom:none; }
+.job-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.job-state { margin-left:auto; font-size:12.5px; font-weight:600; }
+.job-running { background:color-mix(in srgb, var(--accent) 7%, transparent); }
+.spin { display:inline-block; animation:spin 1s linear infinite; color:var(--accent); }
+@keyframes spin { to { transform:rotate(360deg); } }
