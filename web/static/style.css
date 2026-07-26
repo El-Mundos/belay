@@ -63,6 +63,11 @@ pre { background:#0a0c10; color:#cdd3e0; padding:10px; border-radius:6px; overfl
 .rec-head .time { margin-left:auto; font-size:12px; }
 .badge-err { color:var(--err); font-weight:600; font-size:12.5px; }
 .rec-err { color:var(--err); font-size:12.5px; margin-top:6px; }
+.record.ok { border-left:3px solid var(--ok); }
+.badge-ok { color:var(--ok); font-weight:600; font-size:12.5px; }
+.badge-rev { color:var(--upd); font-weight:600; font-size:12.5px; }
+.rec-action { display:inline; margin:0; }
+.btn.warn { background:var(--upd); border-color:var(--upd); color:#1a1d26; margin-left:0; }
 
 /* modal */
 .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex;

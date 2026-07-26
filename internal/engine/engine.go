@@ -31,11 +31,12 @@ type Request struct {
 	ToImage   string // target image ref, e.g. "grafana/grafana-oss:13.1.0"
 }
 
-// Result is the outcome of an update attempt, including logs captured on failure.
+// Result is the outcome of an update attempt, including the logs captured during it.
 type Result struct {
 	Request  Request
 	Outcome  Outcome
-	Logs     string // container logs captured on failure, surfaced in the UI
+	Logs     string // container logs captured during the update (success or failure)
+	Snapshot string // on success: the retained volume snapshot id (caller owns cleanup); "" if none
 	Duration time.Duration
 	Err      error
 }
@@ -109,8 +110,41 @@ func (e *Engine) SafeUpdate(ctx context.Context, r Request) Result {
 		return e.rollback(ctx, r, &res, start, err, snap)
 	}
 
-	e.discard(ctx, r, snap)
+	// success: record the update's logs, and hand the snapshot to the caller so it can offer a
+	// manual rollback for a retention window. The caller is responsible for discarding it later.
+	if logs, err := e.Deployer.Logs(ctx, r, 200); err == nil {
+		res.Logs = logs
+	}
+	res.Snapshot = snap
 	return finish(OutcomeUpdated, nil)
+}
+
+// ManualRollback reverts a previously-successful update on user request: it restores the retained
+// volume snapshot and the previous image, then health-gates. r.FromImage is the image to revert TO
+// (the old one); r.ToImage is what's currently running. On success it discards the snapshot and
+// reports OutcomeRolledBack; if it can't complete it reports OutcomeError (needs a human).
+func (e *Engine) ManualRollback(ctx context.Context, r Request, snapshot string) Result {
+	start := time.Now()
+	res := Result{Request: r}
+	fail := func(err error) Result {
+		res.Outcome, res.Err, res.Duration = OutcomeError, err, time.Since(start)
+		return res
+	}
+	if e.Snapshot != nil && snapshot != "" {
+		e.Snapshot.Restore(ctx, r, snapshot) // restore pre-update data (stops the service first)
+	}
+	if err := e.Deployer.SetImage(ctx, r, r.FromImage); err != nil {
+		return fail(err)
+	}
+	if err := e.Deployer.Up(ctx, r); err != nil {
+		return fail(err)
+	}
+	if err := e.Health.Wait(ctx, r); err != nil {
+		return fail(err)
+	}
+	e.discard(ctx, r, snapshot)
+	res.Outcome, res.Duration = OutcomeRolledBack, time.Since(start)
+	return res
 }
 
 func (e *Engine) discard(ctx context.Context, r Request, snap string) {

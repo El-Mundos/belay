@@ -93,15 +93,21 @@ func (f *fakeSnap) Snapshot(context.Context, Request) (string, error) {
 func (f *fakeSnap) Restore(context.Context, Request, string) error { f.restored = true; return nil }
 func (f *fakeSnap) Discard(context.Context, Request, string)       { f.discarded = true }
 
-func TestSafeUpdate_SnapshotDiscardedOnSuccess(t *testing.T) {
+func TestSafeUpdate_SnapshotRetainedOnSuccess(t *testing.T) {
 	d := &fakeDeployer{current: "app:1.0"}
 	fs := &fakeSnap{}
 	e := &Engine{Deployer: d, Health: fakeGate{healthy: true}, Snapshot: fs}
-	if res := e.SafeUpdate(context.Background(), req()); res.Outcome != OutcomeUpdated {
+	res := e.SafeUpdate(context.Background(), req())
+	if res.Outcome != OutcomeUpdated {
 		t.Fatalf("outcome = %q", res.Outcome)
 	}
-	if !fs.snapshotted || !fs.discarded || fs.restored {
-		t.Fatalf("snapshot=%v discard=%v restore=%v (want snapshot+discard, no restore)", fs.snapshotted, fs.discarded, fs.restored)
+	// On success the snapshot is kept (for manual rollback) and handed back to the caller —
+	// NOT discarded here and never restored.
+	if !fs.snapshotted || fs.discarded || fs.restored {
+		t.Fatalf("snapshot=%v discard=%v restore=%v (want snapshot, no discard, no restore)", fs.snapshotted, fs.discarded, fs.restored)
+	}
+	if res.Snapshot != "s1" {
+		t.Fatalf("res.Snapshot = %q, want s1 (handed to caller)", res.Snapshot)
 	}
 }
 
@@ -118,6 +124,36 @@ func TestSafeUpdate_VolumeRestoredOnRollback(t *testing.T) {
 	}
 	if d.current != "app:1.0" {
 		t.Fatalf("image not reverted: %q", d.current)
+	}
+}
+
+func TestManualRollback_RestoresDataAndImage(t *testing.T) {
+	d := &fakeDeployer{current: "app:2.0"} // currently on the new version
+	fs := &fakeSnap{}
+	e := &Engine{Deployer: d, Health: fakeGate{healthy: true}, Snapshot: fs}
+	// FromImage = the old image to revert TO; ToImage = what's running now.
+	r := Request{Project: "p", Service: "s", FromImage: "app:1.0", ToImage: "app:2.0"}
+	res := e.ManualRollback(context.Background(), r, "s1")
+	if res.Outcome != OutcomeRolledBack {
+		t.Fatalf("outcome = %q, want rolled_back", res.Outcome)
+	}
+	if d.current != "app:1.0" {
+		t.Fatalf("image = %q, want reverted to app:1.0", d.current)
+	}
+	if !fs.restored {
+		t.Fatal("data snapshot was not restored")
+	}
+	if !fs.discarded {
+		t.Fatal("snapshot should be discarded after a successful manual rollback")
+	}
+}
+
+func TestManualRollback_UnhealthyIsError(t *testing.T) {
+	d := &fakeDeployer{current: "app:2.0"}
+	e := &Engine{Deployer: d, Health: fakeGate{healthy: false}, Snapshot: &fakeSnap{}}
+	r := Request{Project: "p", Service: "s", FromImage: "app:1.0", ToImage: "app:2.0"}
+	if res := e.ManualRollback(context.Background(), r, "s1"); res.Outcome != OutcomeError {
+		t.Fatalf("outcome = %q, want error when the reverted version won't come up healthy", res.Outcome)
 	}
 }
 

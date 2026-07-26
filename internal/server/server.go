@@ -33,14 +33,15 @@ type Project struct {
 }
 
 type Config struct {
-	Addr          string
-	Projects      []Project
-	Password      string
-	ForwardHeader string
-	NotifyWebhook string
-	Snapshot      bool
-	Timeout       time.Duration
-	MinUptime     time.Duration
+	Addr           string
+	Projects       []Project
+	Password       string
+	ForwardHeader  string
+	NotifyWebhook  string
+	Snapshot       bool
+	Timeout        time.Duration
+	MinUptime      time.Duration
+	RollbackWindow time.Duration // how long a successful update stays manually roll-back-able (0 = off)
 }
 
 type Server struct {
@@ -60,6 +61,9 @@ func New(cfg Config) *Server {
 	}
 	if cfg.MinUptime == 0 {
 		cfg.MinUptime = 10 * time.Second
+	}
+	if cfg.RollbackWindow == 0 {
+		cfg.RollbackWindow = 24 * time.Hour
 	}
 	funcs := template.FuncMap{"sub": func(a, b int) int { return a - b }}
 	page := func(files ...string) *template.Template {
@@ -100,6 +104,9 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /check", s.guard(s.handleCheck))
 	mux.HandleFunc("POST /update", s.guard(s.handleUpdate))
 	mux.HandleFunc("POST /update-all", s.guard(s.handleUpdateAll))
+	mux.HandleFunc("POST /rollback", s.guard(s.handleRollback))
+
+	go s.sweepRollbacks() // discard snapshots whose retention window has passed
 
 	if !s.authEnabled() {
 		log.Printf("WARNING: no auth configured (set --password or --forward-header); bind to localhost only.")
@@ -211,10 +218,87 @@ func (s *Server) handleFailed(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "failed", data)
 }
 
+// histRow is a successful/reverted record plus whether the manual-rollback button is live for it.
+type histRow struct {
+	store.Record
+	CanRollback bool   // newest success for this service, still within the retention window
+	Superseded  bool   // an older success whose rollback point was replaced by a newer update
+	PID         int    // project id, for the rollback POST
+	Expires     string // human "expires in …" for the button tooltip
+}
+
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	recs := s.store.Succeeded()
+	now := time.Now()
+	seen := map[string]bool{} // project+service already shown a newer row
+	rows := make([]histRow, 0, len(recs))
+	for _, rec := range recs {
+		row := histRow{Record: rec}
+		k := rec.Project + "\x00" + rec.Service
+		if pt, ok := s.store.RollbackFor(rec.Project, rec.Service); ok && now.Before(pt.ExpiresAt) {
+			if !seen[k] && pt.ToImage == rec.To {
+				row.CanRollback = true
+				row.PID = s.pidByName(rec.Project)
+				row.Expires = "expires " + pt.ExpiresAt.Format("Jan 2, 15:04")
+			} else {
+				row.Superseded = true // a live point exists, but for a newer update
+			}
+		}
+		seen[k] = true
+		rows = append(rows, row)
+	}
 	data := s.base(r, "history")
-	data["Records"] = s.store.Succeeded()
+	data["Records"] = rows
 	s.render(w, "history", data)
+}
+
+// handleRollback reverts a previously-successful update (data + image) on user request.
+func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.project(r.FormValue("p"))
+	if !ok {
+		http.Error(w, "unknown project", http.StatusBadRequest)
+		return
+	}
+	service := r.FormValue("s")
+	pt, ok := s.store.TakeRollback(p.Name, service)
+	if !ok {
+		http.Error(w, "no rollback point for this service", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout+30*time.Second)
+	defer cancel()
+	req := engine.Request{Project: pt.File, Service: service, FromImage: pt.FromImage, ToImage: pt.ToImage}
+	res := s.eng.ManualRollback(ctx, req, pt.Snapshot)
+
+	outcome, errStr := "reverted", ""
+	if res.Err != nil {
+		errStr = res.Err.Error()
+	}
+	if res.Outcome == engine.OutcomeError {
+		outcome = "error" // couldn't restore — needs attention, so let it light the badge
+	} else {
+		_ = compose.CommitIfRepo(pt.File, fmt.Sprintf("belay: rollback %s %s -> %s", service, pt.ToImage, pt.FromImage))
+	}
+	s.store.Add(store.Record{
+		Project: p.Name, Service: service, From: pt.ToImage, To: pt.FromImage,
+		Outcome: outcome, Err: errStr, Logs: strings.TrimSpace(res.Logs),
+		Duration: res.Duration.Round(time.Millisecond).String(),
+	})
+	http.Redirect(w, r, "/history", http.StatusSeeOther)
+}
+
+// sweepRollbacks discards snapshots whose retention window has elapsed.
+func (s *Server) sweepRollbacks() {
+	if s.eng.Snapshot == nil {
+		return
+	}
+	for range time.Tick(5 * time.Minute) {
+		for _, pt := range s.store.SweepExpired(time.Now()) {
+			if pt.Snapshot != "" {
+				s.eng.Snapshot.Discard(context.Background(), engine.Request{Project: pt.File, Service: pt.Service}, pt.Snapshot)
+			}
+		}
+	}
 }
 
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
@@ -316,6 +400,7 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 	res := s.eng.SafeUpdate(ctx, engine.Request{Project: p.File, Service: service, FromImage: current, ToImage: target})
 	if res.Outcome == engine.OutcomeUpdated {
 		_ = compose.CommitIfRepo(p.File, fmt.Sprintf("belay: update %s %s -> %s", service, current, target))
+		s.retainRollback(ctx, p, service, current, target, res.Snapshot)
 	}
 	errStr := ""
 	if res.Err != nil {
@@ -335,7 +420,37 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 	return res, current
 }
 
+// retainRollback keeps a successful update's snapshot + old image as the service's single rollback
+// point for the retention window, discarding any point it supersedes. If retention is off, it
+// discards the snapshot immediately.
+func (s *Server) retainRollback(ctx context.Context, p Project, service, from, to, snapshot string) {
+	if s.cfg.RollbackWindow <= 0 {
+		if s.eng.Snapshot != nil && snapshot != "" {
+			s.eng.Snapshot.Discard(ctx, engine.Request{Project: p.File, Service: service}, snapshot)
+		}
+		return
+	}
+	now := time.Now()
+	old, had := s.store.SetRollback(store.RollbackPoint{
+		Project: p.Name, Service: service, File: p.File,
+		FromImage: from, ToImage: to, Snapshot: snapshot,
+		CreatedAt: now, ExpiresAt: now.Add(s.cfg.RollbackWindow),
+	})
+	if had && old.Snapshot != "" && s.eng.Snapshot != nil {
+		s.eng.Snapshot.Discard(ctx, engine.Request{Project: old.File, Service: old.Service}, old.Snapshot)
+	}
+}
+
 // ---- helpers ----
+
+func (s *Server) pidByName(name string) int {
+	for _, p := range s.cfg.Projects {
+		if p.Name == name {
+			return p.ID
+		}
+	}
+	return -1
+}
 
 func (s *Server) project(id string) (Project, bool) {
 	n, err := strconv.Atoi(id)

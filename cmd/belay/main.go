@@ -73,6 +73,7 @@ func runServer(args []string) {
 	snapshot := fs.Bool("snapshot", true, "snapshot volumes before updating and restore data on rollback")
 	timeout := fs.Duration("timeout", 90*time.Second, "health-gate timeout")
 	minUptime := fs.Duration("min-uptime", 10*time.Second, "stayed-running window when the image has no healthcheck")
+	rollbackWindow := fs.Duration("rollback-window", 24*time.Hour, "how long a successful update stays manually roll-back-able (0 = off)")
 	fs.Parse(args)
 
 	var pl []server.Project
@@ -100,6 +101,7 @@ func runServer(args []string) {
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
 		NotifyWebhook: *notifyURL, Snapshot: *snapshot, Timeout: *timeout, MinUptime: *minUptime,
+		RollbackWindow: *rollbackWindow,
 	})
 	if err := srv.Run(); err != nil {
 		fatal(err)
@@ -182,13 +184,17 @@ func runUpdate(args []string) {
 	if *snapshot {
 		e.Snapshot = agent.Snapshotter{}
 	}
-	res := e.SafeUpdate(context.Background(), engine.Request{
-		Project: project, Service: service, FromImage: current, ToImage: newImage,
-	})
+	req := engine.Request{Project: project, Service: service, FromImage: current, ToImage: newImage}
+	res := e.SafeUpdate(context.Background(), req)
 
 	dur := res.Duration.Round(time.Millisecond)
 	switch res.Outcome {
 	case engine.OutcomeUpdated:
+		// The engine keeps the success snapshot for a caller-managed rollback window; the CLI
+		// has no such window, so discard it now.
+		if e.Snapshot != nil && res.Snapshot != "" {
+			e.Snapshot.Discard(context.Background(), req, res.Snapshot)
+		}
 		fmt.Printf("✅ updated to %s (%s)\n", newImage, dur)
 		if !*noCommit {
 			if err := compose.CommitIfRepo(file, fmt.Sprintf("belay: update %s %s -> %s", service, current, newImage)); err != nil {
