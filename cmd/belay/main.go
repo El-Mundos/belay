@@ -17,6 +17,7 @@ import (
 	"github.com/El-Mundos/belay/internal/engine"
 	"github.com/El-Mundos/belay/internal/health"
 	"github.com/El-Mundos/belay/internal/registry"
+	"github.com/El-Mundos/belay/internal/selfupdate"
 	"github.com/El-Mundos/belay/internal/server"
 	"github.com/El-Mundos/belay/internal/version"
 )
@@ -30,6 +31,8 @@ usage:
   belay update [flags] <compose-file|dir> <service> <new-image>
                    update one service, health-check it, and roll back on failure
   belay server     start the web UI + controller (includes a local agent)
+  belay self-update [--check]
+                   recreate the belay container on the newest image tag (--check only reports)
   belay agent      start a headless agent that dials out to a server
   belay version    print version
 `, version.Version)
@@ -47,6 +50,8 @@ func main() {
 		runUpdate(os.Args[2:])
 	case "server":
 		runServer(os.Args[2:])
+	case "self-update":
+		runSelfUpdate(os.Args[2:])
 	case "agent":
 		fmt.Println("belay agent: not implemented yet") // TODO
 	case "version", "-v", "--version":
@@ -107,6 +112,33 @@ func runServer(args []string) {
 	if err := srv.Run(); err != nil {
 		fatal(err)
 	}
+}
+
+func runSelfUpdate(args []string) {
+	fs := flag.NewFlagSet("self-update", flag.ExitOnError)
+	check := fs.Bool("check", false, "only report whether a newer image is available")
+	fs.Parse(args)
+	m := selfupdate.Detect(context.Background())
+	if m == nil || !m.Enabled() {
+		fatal(fmt.Errorf("self-update unavailable: belay is not running in a detectable container"))
+	}
+	if *check {
+		avail, err := m.Available(context.Background())
+		if err != nil {
+			fatal(err)
+		}
+		if avail {
+			fmt.Printf("update available for %s\n", m.Image())
+		} else {
+			fmt.Printf("%s is up to date\n", m.Image())
+		}
+		return
+	}
+	fmt.Printf("recreating belay from %s …\n", m.Image())
+	if err := m.Apply(context.Background()); err != nil {
+		fatal(err)
+	}
+	fmt.Println("helper launched; belay will be replaced momentarily.")
 }
 
 func runCheck(args []string) {

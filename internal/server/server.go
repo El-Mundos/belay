@@ -23,6 +23,7 @@ import (
 	"github.com/El-Mundos/belay/internal/health"
 	"github.com/El-Mundos/belay/internal/notify"
 	"github.com/El-Mundos/belay/internal/registry"
+	"github.com/El-Mundos/belay/internal/selfupdate"
 	"github.com/El-Mundos/belay/internal/store"
 	"github.com/El-Mundos/belay/web"
 	"path/filepath"
@@ -48,17 +49,19 @@ type Config struct {
 }
 
 type Server struct {
-	cfg    Config
-	reg    *registry.Client
-	eng    *engine.Engine
-	store  *store.Store
-	set    *config.Store
-	notify *notify.Notifier
-	tpl    map[string]*template.Template
-	mu     sync.Mutex
-	sess   map[string]struct{}
-	checks map[string]checkResult // auto-check cache, key project\x00service
-	jobs   *jobManager            // live activity panel (SSE)
+	cfg     Config
+	reg     *registry.Client
+	eng     *engine.Engine
+	store   *store.Store
+	set     *config.Store
+	notify  *notify.Notifier
+	tpl     map[string]*template.Template
+	mu      sync.Mutex
+	sess    map[string]struct{}
+	checks  map[string]checkResult // auto-check cache, key project\x00service
+	jobs    *jobManager            // live activity panel (SSE)
+	su      *selfupdate.Manager    // belay self-update (nil-safe if not in a container)
+	suAvail bool                   // cached: a newer belay image is available
 }
 
 // checkResult is a cached "is there a newer version" answer from auto-check.
@@ -131,6 +134,7 @@ func New(cfg Config) *Server {
 		sess:   map[string]struct{}{},
 		checks: map[string]checkResult{},
 		jobs:   newJobManager(),
+		su:     selfupdate.Detect(context.Background()),
 	}
 }
 
@@ -154,9 +158,11 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /pin", s.guard(s.handlePin))
 	mux.HandleFunc("GET /activity", s.guard(s.handleActivity))
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	mux.HandleFunc("POST /self-update", s.guard(s.handleSelfUpdate))
 
-	go s.sweepRollbacks() // discard snapshots whose retention window has passed
-	go s.autoCheckLoop()  // periodic version checks (cache + notify), per settings
+	go s.sweepRollbacks()  // discard snapshots whose retention window has passed
+	go s.autoCheckLoop()   // periodic version checks (cache + notify), per settings
+	go s.selfUpdateWatch() // cache whether a newer belay image is available
 
 	if !s.authEnabled() {
 		log.Printf("WARNING: no auth configured (set --password or --forward-header); bind to localhost only.")
@@ -230,10 +236,17 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // ---- shared page data ----
 
 func (s *Server) base(r *http.Request, active string) map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"User": s.user(r), "Active": active,
 		"FailedCount": s.store.FailedCount(), "ActiveJobs": s.jobs.active(), "Pending": s.pendingCount(),
 	}
+	s.mu.Lock()
+	m["SelfUpdate"] = s.suAvail
+	s.mu.Unlock()
+	if s.su != nil {
+		m["SelfUpdateImage"] = s.su.Image()
+	}
+	return m
 }
 
 // ---- tabs ----

@@ -181,6 +181,43 @@ func (s *Server) runAutoCheck() {
 	}
 }
 
+// ---- self-update ----
+
+// selfUpdateWatch caches whether a newer belay image is available (checked at startup + every 30m).
+func (s *Server) selfUpdateWatch() {
+	if s.su == nil || !s.su.Enabled() {
+		return
+	}
+	for {
+		avail, err := s.su.Available(context.Background())
+		if err == nil {
+			s.mu.Lock()
+			s.suAvail = avail
+			s.mu.Unlock()
+		}
+		time.Sleep(30 * time.Minute)
+	}
+}
+
+// handleSelfUpdate recreates the belay container from the current image tag. Belay is torn down and
+// replaced by a detached helper moments after this responds, so we render a "reconnecting" page first.
+func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.su == nil || !s.su.Enabled() {
+		http.Error(w, "self-update not available (belay is not running in a detectable container)", http.StatusBadRequest)
+		return
+	}
+	if err := s.su.Apply(r.Context()); err != nil {
+		http.Error(w, "self-update failed to launch: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, `<!doctype html><meta charset=utf-8><title>Belay updating…</title>
+<meta http-equiv="refresh" content="15;url=/">
+<style>body{font:15px/1.6 -apple-system,sans-serif;background:#0e1014;color:#e6e8ee;display:grid;place-items:center;height:100vh;margin:0}</style>
+<div style="text-align:center"><h2>⚓ Belay is updating itself…</h2>
+<p>The container is being recreated on the new image. This page will reconnect in ~15s.</p></div>`)
+}
+
 // ---- metrics ----
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {

@@ -17,6 +17,15 @@
     {{if .User}}<span class="user">{{.User}} · <a href="/logout">log out</a></span>{{end}}
   </div>
 </header>
+{{if .SelfUpdate}}
+<div class="selfupdate-banner">
+  ⬆ A newer <b>Belay</b> image is available ({{.SelfUpdateImage}}).
+  <form method="post" action="/self-update" style="display:inline"
+        onsubmit="return belayConfirm('Update Belay itself now? Belay will restart from the new image (a few seconds of downtime).', this)">
+    <button class="btn" type="submit">Update Belay</button>
+  </form>
+</div>
+{{end}}
 {{if .Active}}
 <nav class="tabs">
   <a href="/" class="{{if eq .Active "updates"}}on{{end}}">Updates{{if .Pending}} <span class="badge badge-upd">{{.Pending}}</span>{{end}}</a>

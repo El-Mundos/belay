@@ -127,3 +127,9 @@ tr.pinned { opacity:.55; }
 .job-running { background:color-mix(in srgb, var(--accent) 7%, transparent); }
 .spin { display:inline-block; animation:spin 1s linear infinite; color:var(--accent); }
 @keyframes spin { to { transform:rotate(360deg); } }
+
+/* self-update banner */
+.selfupdate-banner { max-width:960px; margin:14px auto 0; padding:11px 16px; border-radius:10px;
+  background:color-mix(in srgb, var(--accent) 14%, var(--panel)); border:1px solid var(--accent);
+  font-size:13.5px; display:flex; align-items:center; gap:12px; }
+.selfupdate-banner .btn { margin-left:auto; }
