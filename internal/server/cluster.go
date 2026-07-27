@@ -1,0 +1,184 @@
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/El-Mundos/belay/internal/cluster"
+	"github.com/El-Mundos/belay/internal/notify"
+	"github.com/El-Mundos/belay/internal/registry"
+	"github.com/El-Mundos/belay/internal/store"
+)
+
+// agentConn is a connected remote agent: the stacks it reported and a queue of commands for it.
+type agentConn struct {
+	host     string
+	projects []cluster.Project
+	lastSeen time.Time
+	queue    chan cluster.Command
+}
+
+func (s *Server) agentsEnabled() bool { return s.cfg.AgentToken != "" }
+
+// agentAuth checks the shared bearer token on every /agent/* request.
+func (s *Server) agentAuth(r *http.Request) bool {
+	if !s.agentsEnabled() {
+		return false
+	}
+	h := r.Header.Get("Authorization")
+	return strings.HasPrefix(h, "Bearer ") && strings.TrimPrefix(h, "Bearer ") == s.cfg.AgentToken
+}
+
+func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
+	if !s.agentAuth(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var reg cluster.Registration
+	if json.NewDecoder(r.Body).Decode(&reg) != nil || reg.Host == "" {
+		http.Error(w, "bad registration", http.StatusBadRequest)
+		return
+	}
+	s.agentsMu.Lock()
+	c := s.agents[reg.Host]
+	if c == nil {
+		c = &agentConn{host: reg.Host, queue: make(chan cluster.Command, 32)}
+		s.agents[reg.Host] = c
+	}
+	c.projects = reg.Projects
+	c.lastSeen = time.Now()
+	s.agentsMu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleAgentPoll long-polls: it blocks up to 25s for a queued command, else 204 (agent re-polls).
+func (s *Server) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
+	if !s.agentAuth(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	host := r.URL.Query().Get("host")
+	s.agentsMu.Lock()
+	c := s.agents[host]
+	if c != nil {
+		c.lastSeen = time.Now()
+	}
+	s.agentsMu.Unlock()
+	if c == nil {
+		http.Error(w, "register first", http.StatusNotFound)
+		return
+	}
+	select {
+	case cmd := <-c.queue:
+		json.NewEncoder(w).Encode(cmd)
+	case <-time.After(25 * time.Second):
+		w.WriteHeader(http.StatusNoContent)
+	case <-r.Context().Done():
+	}
+}
+
+// handleAgentResult records a remote update outcome into the shared store (host-labelled) + notifies.
+func (s *Server) handleAgentResult(w http.ResponseWriter, r *http.Request) {
+	if !s.agentAuth(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var res cluster.Result
+	if json.NewDecoder(r.Body).Decode(&res) != nil {
+		http.Error(w, "bad result", http.StatusBadRequest)
+		return
+	}
+	label := res.Host + "/" + res.Project
+	s.store.Add(store.Record{
+		Project: label, Service: res.Service, From: res.From, To: res.To,
+		Outcome: res.Outcome, Err: res.Err, Logs: res.Logs, Duration: res.Duration,
+	})
+	if res.Outcome == "rolled_back" || res.Outcome == "error" {
+		s.notify.Failure(notify.Event{
+			Project: label, Service: res.Service, From: res.From, To: res.To,
+			Outcome: res.Outcome, Error: res.Err, Logs: res.Logs,
+		})
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- UI: Hosts tab ----
+
+type hostView struct {
+	Host     string
+	Online   bool
+	Ago      string
+	Projects []cluster.Project
+}
+
+func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
+	s.agentsMu.Lock()
+	hosts := make([]hostView, 0, len(s.agents))
+	for _, c := range s.agents {
+		online := time.Since(c.lastSeen) < 90*time.Second
+		hosts = append(hosts, hostView{
+			Host: c.host, Online: online,
+			Ago:      time.Since(c.lastSeen).Round(time.Second).String(),
+			Projects: c.projects,
+		})
+	}
+	s.agentsMu.Unlock()
+	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Host < hosts[j].Host })
+	data := s.base(r, "hosts")
+	data["Hosts"] = hosts
+	data["AgentsEnabled"] = s.agentsEnabled()
+	s.render(w, "hosts", data)
+}
+
+// handleRemoteUpdate resolves the newest stable tag for a remote service (the server has registry
+// access) and enqueues an update command for that agent host.
+func (s *Server) handleRemoteUpdate(w http.ResponseWriter, r *http.Request) {
+	host := r.FormValue("host")
+	s.agentsMu.Lock()
+	c := s.agents[host]
+	s.agentsMu.Unlock()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if c == nil {
+		fmt.Fprint(w, `<span class="err">host offline</span>`)
+		return
+	}
+	current := r.FormValue("image")
+	ref := registry.ParseRef(current)
+	newer, comparable, err := s.reg.Newer(r.Context(), ref)
+	switch {
+	case err != nil:
+		fmt.Fprintf(w, `<span class="err">%s</span>`, err.Error())
+		return
+	case !comparable || len(newer) == 0:
+		fmt.Fprint(w, `<span class="muted">up to date</span>`)
+		return
+	}
+	target := strings.TrimSuffix(current, ":"+ref.Tag) + ":" + newer[len(newer)-1]
+	cmd := cluster.Command{
+		ID: newToken()[:12], Kind: "update",
+		Project: r.FormValue("file"), Service: r.FormValue("s"), Image: target,
+	}
+	select {
+	case c.queue <- cmd:
+		fmt.Fprintf(w, `<span class="ok">queued → %s — see History</span>`, newer[len(newer)-1])
+	default:
+		fmt.Fprint(w, `<span class="err">agent queue full</span>`)
+	}
+}
+
+// agentCount is the number of currently-online agents (for the nav badge).
+func (s *Server) agentCount() int {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	n := 0
+	for _, c := range s.agents {
+		if time.Since(c.lastSeen) < 90*time.Second {
+			n++
+		}
+	}
+	return n
+}

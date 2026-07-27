@@ -33,7 +33,8 @@ usage:
   belay server     start the web UI + controller (includes a local agent)
   belay self-update [--check]
                    recreate the belay container on the newest image tag (--check only reports)
-  belay agent      start a headless agent that dials out to a server
+  belay agent --server <url> --token <token>
+                   run a headless agent that dials out to a server and updates local stacks on command
   belay version    print version
 `, version.Version)
 }
@@ -53,7 +54,7 @@ func main() {
 	case "self-update":
 		runSelfUpdate(os.Args[2:])
 	case "agent":
-		fmt.Println("belay agent: not implemented yet") // TODO
+		runAgent(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("belay", version.Version)
 	default:
@@ -75,6 +76,7 @@ func runServer(args []string) {
 	password := fs.String("password", os.Getenv("BELAY_PASSWORD"), "built-in login password (env BELAY_PASSWORD)")
 	forward := fs.String("forward-header", os.Getenv("BELAY_FORWARD_HEADER"), "trusted reverse-proxy user header (e.g. X-authentik-username)")
 	notifyURL := fs.String("notify-webhook", os.Getenv("BELAY_NOTIFY_WEBHOOK"), "webhook URL to POST on failed updates (ntfy/Discord/Slack/…)")
+	agentToken := fs.String("agent-token", os.Getenv("BELAY_AGENT_TOKEN"), "shared token to accept remote agents (env BELAY_AGENT_TOKEN; empty = multi-host off)")
 	snapshot := fs.Bool("snapshot", true, "snapshot volumes before updating and restore data on rollback")
 	timeout := fs.Duration("timeout", 90*time.Second, "health-gate timeout")
 	minUptime := fs.Duration("min-uptime", 10*time.Second, "stayed-running window when the image has no healthcheck")
@@ -107,7 +109,7 @@ func runServer(args []string) {
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
 		NotifyWebhook: *notifyURL, Snapshot: *snapshot, Timeout: *timeout, MinUptime: *minUptime,
-		RollbackWindow: *rollbackWindow, DataDir: *dataDir,
+		RollbackWindow: *rollbackWindow, DataDir: *dataDir, AgentToken: *agentToken,
 	})
 	if err := srv.Run(); err != nil {
 		fatal(err)

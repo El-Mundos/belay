@@ -46,6 +46,7 @@ type Config struct {
 	MinUptime      time.Duration
 	RollbackWindow time.Duration // seed for a fresh install; the settings page owns it thereafter
 	DataDir        string        // where settings.json + store.json live ("" = in-memory only)
+	AgentToken     string        // shared bearer token for remote agents ("" = multi-host disabled)
 }
 
 type Server struct {
@@ -62,6 +63,9 @@ type Server struct {
 	jobs    *jobManager            // live activity panel (SSE)
 	su      *selfupdate.Manager    // belay self-update (nil-safe if not in a container)
 	suAvail bool                   // cached: a newer belay image is available
+
+	agentsMu sync.Mutex
+	agents   map[string]*agentConn // connected remote agents, by host
 }
 
 // checkResult is a cached "is there a newer version" answer from auto-check.
@@ -130,11 +134,13 @@ func New(cfg Config) *Server {
 			"status":    page("templates/status.html"),
 			"result":    page("templates/result.html"),
 			"activity":  page("templates/activity.html"),
+			"hosts":     page("templates/layout.html", "templates/hosts.html"),
 		},
 		sess:   map[string]struct{}{},
 		checks: map[string]checkResult{},
 		jobs:   newJobManager(),
 		su:     selfupdate.Detect(context.Background()),
+		agents: map[string]*agentConn{},
 	}
 }
 
@@ -159,6 +165,12 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /activity", s.guard(s.handleActivity))
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("POST /self-update", s.guard(s.handleSelfUpdate))
+	mux.HandleFunc("GET /hosts", s.guard(s.handleHosts))
+	mux.HandleFunc("POST /remote-update", s.guard(s.handleRemoteUpdate))
+	// remote-agent endpoints (token-authed, not session-guarded)
+	mux.HandleFunc("POST /agent/register", s.handleAgentRegister)
+	mux.HandleFunc("GET /agent/poll", s.handleAgentPoll)
+	mux.HandleFunc("POST /agent/result", s.handleAgentResult)
 
 	go s.sweepRollbacks()  // discard snapshots whose retention window has passed
 	go s.autoCheckLoop()   // periodic version checks (cache + notify), per settings
@@ -246,6 +258,8 @@ func (s *Server) base(r *http.Request, active string) map[string]any {
 	if s.su != nil {
 		m["SelfUpdateImage"] = s.su.Image()
 	}
+	m["AgentsEnabled"] = s.agentsEnabled()
+	m["HostCount"] = s.agentCount()
 	return m
 }
 
