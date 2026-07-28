@@ -170,6 +170,22 @@ func (s *Server) handleRemoteUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// enqueue queues an update command for a host's agent; returns false if the host is unknown/full.
+func (s *Server) enqueue(host, file, service, image string) bool {
+	s.agentsMu.Lock()
+	c := s.agents[host]
+	s.agentsMu.Unlock()
+	if c == nil {
+		return false
+	}
+	select {
+	case c.queue <- cluster.Command{ID: newToken()[:12], Kind: "update", Project: file, Service: service, Image: image}:
+		return true
+	default:
+		return false
+	}
+}
+
 // agentCount is the number of currently-online agents (for the nav badge).
 func (s *Server) agentCount() int {
 	s.agentsMu.Lock()

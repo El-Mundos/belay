@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,6 +136,7 @@ func New(cfg Config) *Server {
 			"result":    page("templates/result.html"),
 			"activity":  page("templates/activity.html"),
 			"hosts":     page("templates/layout.html", "templates/hosts.html"),
+			"review":    page("templates/layout.html", "templates/review.html"),
 		},
 		sess:   map[string]struct{}{},
 		checks: map[string]checkResult{},
@@ -155,6 +157,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /failed", s.guard(s.handleFailed))
 	mux.HandleFunc("GET /history", s.guard(s.handleHistory))
 	mux.HandleFunc("GET /check", s.guard(s.handleCheck))
+	mux.HandleFunc("GET /review", s.guard(s.handleReview))
 	mux.HandleFunc("POST /update", s.guard(s.handleUpdate))
 	mux.HandleFunc("POST /update-all", s.guard(s.handleUpdateAll))
 	mux.HandleFunc("POST /rollback", s.guard(s.handleRollback))
@@ -265,33 +268,83 @@ func (s *Server) base(r *http.Request, active string) map[string]any {
 
 // ---- tabs ----
 
-type svcView struct {
+// svcRow / projGroup / hostGroup back the collapsible Updates tab (local host + remote agents).
+type svcRow struct {
 	Name, Image string
 	Pinned      bool
+	Local       bool
+	Host        string // "" for local
+	PID         int    // local project id; -1 for remote
+	File        string // compose file path (remote check/update + pin key)
 }
-type projView struct {
-	ID       int
+type projGroup struct {
+	Key      string // collapse id
 	Name     string
 	File     string
-	Services []svcView
+	PID      int
+	Services []svcRow
+}
+type hostGroup struct {
+	Key      string
+	Name     string
+	Local    bool
+	Online   bool
+	Ago      string
+	Projects []projGroup
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	var projects []projView
+	var hosts []hostGroup
+
+	// local host
+	local := hostGroup{Key: "local", Name: "this host", Local: true, Online: true}
 	for _, p := range s.cfg.Projects {
 		services, err := compose.Services(p.File)
 		if err != nil {
 			log.Printf("dashboard: %s: %v", p.File, err)
 			continue
 		}
-		pv := projView{ID: p.ID, Name: p.Name, File: p.File}
+		g := projGroup{Key: "local\x00" + p.File, Name: p.Name, File: p.File, PID: p.ID}
 		for _, sv := range services {
-			pv.Services = append(pv.Services, svcView{Name: sv.Name, Image: sv.Image, Pinned: s.set.Pinned(p.File, sv.Name)})
+			g.Services = append(g.Services, svcRow{
+				Name: sv.Name, Image: sv.Image, Local: true, PID: p.ID, File: p.File,
+				Pinned: s.set.Pinned(p.File, sv.Name),
+			})
 		}
-		projects = append(projects, pv)
+		local.Projects = append(local.Projects, g)
 	}
+	hosts = append(hosts, local)
+
+	// remote agents
+	s.agentsMu.Lock()
+	var agents []*agentConn
+	for _, c := range s.agents {
+		agents = append(agents, c)
+	}
+	s.agentsMu.Unlock()
+	sort.Slice(agents, func(i, j int) bool { return agents[i].host < agents[j].host })
+	for _, c := range agents {
+		hg := hostGroup{
+			Key: "host\x00" + c.host, Name: c.host,
+			Online: time.Since(c.lastSeen) < 90*time.Second,
+			Ago:    time.Since(c.lastSeen).Round(time.Second).String(),
+		}
+		for _, p := range c.projects {
+			g := projGroup{Key: c.host + "\x00" + p.File, Name: p.Name, File: p.File, PID: -1}
+			for _, sv := range p.Services {
+				g.Services = append(g.Services, svcRow{
+					Name: sv.Name, Image: sv.Image, Local: false, Host: c.host, PID: -1, File: p.File,
+					Pinned: s.set.Pinned(p.File, sv.Name),
+				})
+			}
+			hg.Projects = append(hg.Projects, g)
+		}
+		hosts = append(hosts, hg)
+	}
+
 	data := s.base(r, "updates")
-	data["Projects"] = projects
+	data["Hosts"] = hosts
+	data["MultiHost"] = len(agents) > 0
 	s.render(w, "dashboard", data)
 }
 
@@ -384,21 +437,35 @@ func (s *Server) sweepRollbacks() {
 	}
 }
 
+// handleCheck reports whether a service has a newer version. It works for a local project
+// (?p=&s=) or a remote agent service (?host=&file=&s=&image=), rendering the right update button.
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.project(r.URL.Query().Get("p"))
-	if !ok {
-		http.Error(w, "unknown project", http.StatusBadRequest)
-		return
+	q := r.URL.Query()
+	host, service := q.Get("host"), q.Get("s")
+	var image, file string
+	var pid int
+	if host == "" {
+		p, ok := s.project(q.Get("p"))
+		if !ok {
+			http.Error(w, "unknown project", http.StatusBadRequest)
+			return
+		}
+		pid, file = p.ID, p.File
+		var err error
+		if image, err = compose.FindImage(p.File, service); err != nil {
+			s.render(w, "status", map[string]any{"Err": err.Error()})
+			return
+		}
+	} else {
+		pid, file, image = -1, q.Get("file"), q.Get("image")
 	}
-	service := r.URL.Query().Get("s")
-	image, err := compose.FindImage(p.File, service)
-	if err != nil {
-		s.render(w, "status", map[string]any{"Err": err.Error()})
-		return
-	}
+
 	ref := registry.ParseRef(image)
 	newer, comparable, err := s.reg.Newer(r.Context(), ref)
-	view := map[string]any{"PID": p.ID, "Service": service, "Comparable": comparable}
+	view := map[string]any{
+		"PID": pid, "Service": service, "Comparable": comparable,
+		"Remote": host != "", "Host": host, "File": file, "Image": image,
+	}
 	switch {
 	case err != nil:
 		view["Err"] = err.Error()
@@ -443,34 +510,97 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUpdateAll updates every service that has a newer stable version (sequentially, each
-// health-gated with auto-rollback), then returns to the Updates tab. (Streaming progress = TODO.)
-func (s *Server) handleUpdateAll(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
-	pidFilter := r.FormValue("p")
+// verStep is one newer version and its changelog link.
+type verStep struct{ Version, Changelog string }
+
+// pendingUpd is a service with a newer version available (local or remote), with the version steps
+// in between (each with a changelog) for the pre-update review.
+type pendingUpd struct {
+	Host, Project, Service string
+	Local                  bool
+	File                   string
+	PID                    int
+	From, To, Latest       string
+	Steps                  []verStep
+}
+
+// pendingUpdates scans every non-pinned service across the local host and all agents and returns the
+// ones with a newer stable version, including the changelog for each intermediate version.
+func (s *Server) pendingUpdates(ctx context.Context) []pendingUpd {
+	var out []pendingUpd
+	add := func(local bool, host, projName, file string, pid int, svcName, image string) {
+		if image == "" || !strings.Contains(image, ":") || s.set.Pinned(file, svcName) {
+			return
+		}
+		ref := registry.ParseRef(image)
+		newer, comparable, err := s.reg.Newer(ctx, ref)
+		if err != nil || !comparable || len(newer) == 0 {
+			return
+		}
+		latest := newer[len(newer)-1]
+		u := pendingUpd{
+			Host: host, Project: projName, Service: svcName, Local: local, File: file, PID: pid,
+			From: image, To: strings.TrimSuffix(image, ":"+ref.Tag) + ":" + latest, Latest: latest,
+		}
+		src, _ := s.reg.SourceRepo(ctx, ref)
+		for _, v := range newer {
+			st := verStep{Version: v}
+			if src != "" {
+				st.Changelog = registry.ChangelogURL(src, v)
+			}
+			u.Steps = append(u.Steps, st)
+		}
+		out = append(out, u)
+	}
 	for _, p := range s.cfg.Projects {
-		if pidFilter != "" {
-			if n, err := strconv.Atoi(pidFilter); err != nil || n != p.ID {
-				continue
+		if services, err := compose.Services(p.File); err == nil {
+			for _, sv := range services {
+				add(true, "", p.Name, p.File, p.ID, sv.Name, sv.Image)
 			}
-		}
-		services, err := compose.Services(p.File)
-		if err != nil {
-			continue
-		}
-		for _, sv := range services {
-			if sv.Image == "" || !strings.Contains(sv.Image, ":") || s.set.Pinned(p.File, sv.Name) {
-				continue // skip build-only, untagged, and pinned services
-			}
-			ref := registry.ParseRef(sv.Image)
-			newer, comparable, err := s.reg.Newer(ctx, ref)
-			if err != nil || !comparable || len(newer) == 0 {
-				continue
-			}
-			target := strings.TrimSuffix(sv.Image, ":"+ref.Tag) + ":" + newer[len(newer)-1]
-			s.applyUpdate(ctx, p, sv.Name, target)
 		}
 	}
+	s.agentsMu.Lock()
+	agents := make([]*agentConn, 0, len(s.agents))
+	for _, c := range s.agents {
+		agents = append(agents, c)
+	}
+	s.agentsMu.Unlock()
+	sort.Slice(agents, func(i, j int) bool { return agents[i].host < agents[j].host })
+	for _, c := range agents {
+		for _, p := range c.projects {
+			for _, sv := range p.Services {
+				add(false, c.host, p.Name, p.File, -1, sv.Name, sv.Image)
+			}
+		}
+	}
+	return out
+}
+
+// handleReview shows the pre-update review: everything that would be updated, with per-version
+// changelogs, or "nothing to update".
+func (s *Server) handleReview(w http.ResponseWriter, r *http.Request) {
+	ups := s.pendingUpdates(r.Context())
+	data := s.base(r, "updates")
+	data["Updates"] = ups
+	data["Count"] = len(ups)
+	s.render(w, "review", data)
+}
+
+// handleUpdateAll applies every pending update (local runs the engine; remote is enqueued to its
+// agent) in the background, then returns to the dashboard where the Activity tray shows progress.
+func (s *Server) handleUpdateAll(w http.ResponseWriter, r *http.Request) {
+	go func() {
+		ctx := context.Background()
+		for _, u := range s.pendingUpdates(ctx) {
+			if u.Local {
+				if p, ok := s.project(strconv.Itoa(u.PID)); ok {
+					s.applyUpdate(ctx, p, u.Service, u.To)
+				}
+			} else {
+				s.enqueue(u.Host, u.File, u.Service, u.To)
+			}
+		}
+	}()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 

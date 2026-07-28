@@ -1,37 +1,49 @@
 {{define "content"}}
 <div class="toolbar">
   <input class="search" type="search" placeholder="Search services…" oninput="belayFilter(this.value)" autocomplete="off">
-  <form method="post" action="/update-all" onsubmit="return belayConfirm('Update ALL services that have a newer version? Each is health-checked and rolls back automatically if it fails.', this)">
-    <button class="btn" type="submit">Update all</button>
-  </form>
+  <a class="btn" href="/review">Update all…</a>
 </div>
-{{if not .Projects}}<p class="muted">No projects configured. Start the server with <code>--project &lt;path&gt;</code>.</p>{{end}}
-{{range $p := .Projects}}
-<section class="project">
-  <h2>{{$p.Name}} <span class="path">{{$p.File}}</span></h2>
-  <table>
-    <thead><tr><th>service</th><th>current image</th><th>status</th><th></th></tr></thead>
-    <tbody>
-    {{range .Services}}
-      <tr id="row-{{$p.ID}}-{{.Name}}" class="{{if .Pinned}}pinned{{end}}">
-        <td class="svc">{{.Name}}</td>
-        <td class="mono">{{if .Image}}{{.Image}}{{else}}<span class="muted">(build-only)</span>{{end}}</td>
-        {{if .Image}}
-        <td class="status" hx-get="/check?p={{$p.ID}}&s={{.Name}}" hx-trigger="load" hx-swap="innerHTML">
-          <span class="muted">checking…</span>
-        </td>
-        {{else}}<td class="muted">—</td>{{end}}
-        <td class="pincell">
-          <button class="btn ghost {{if .Pinned}}pinned-on{{end}}" hx-post="/pin"
-                  hx-vals='{"p":"{{$p.ID}}","s":"{{.Name}}","pinned":"{{if .Pinned}}0{{else}}1{{end}}"}'
-                  hx-swap="outerHTML" title="Pinned services are skipped by update-all and auto-check">
-            {{if .Pinned}}📌 pinned{{else}}📌 pin{{end}}
-          </button>
-        </td>
-      </tr>
-    {{end}}
-    </tbody>
-  </table>
-</section>
+{{if not .Hosts}}<p class="muted">No projects. Start the server with <code>--project &lt;path&gt;</code> or let it auto-discover.</p>{{end}}
+{{range $h := .Hosts}}
+<details class="hostgroup" data-grp="{{$h.Key}}" open>
+  <summary>
+    <span class="grp-name">{{if $h.Local}}⌂ this host{{else}}⇅ {{$h.Name}}{{end}}</span>
+    {{if not $h.Local}}{{if $h.Online}}<span class="badge-ok">● online</span>{{else}}<span class="muted small">○ {{$h.Ago}} ago</span>{{end}}{{end}}
+  </summary>
+  {{range $p := $h.Projects}}
+  <details class="projgroup" data-grp="{{$p.Key}}" open>
+    <summary><span class="grp-name">{{$p.Name}}</span> <span class="path">{{$p.File}}</span></summary>
+    <table>
+      <thead><tr><th>service</th><th>current image</th><th>status</th><th></th></tr></thead>
+      <tbody>
+      {{range .Services}}
+        <tr id="row-{{if .Local}}{{.PID}}{{else}}{{$h.Name}}{{end}}-{{.Name}}" class="{{if .Pinned}}pinned{{end}}">
+          <td class="svc">{{.Name}}</td>
+          <td class="mono">{{if .Image}}{{.Image}}{{else}}<span class="muted">(build-only)</span>{{end}}</td>
+          {{if .Image}}
+            {{if .Local}}
+            <td class="status" hx-get="/check" hx-vals='{"p":"{{.PID}}","s":"{{.Name}}"}' hx-trigger="load" hx-swap="innerHTML"><span class="muted">checking…</span></td>
+            {{else}}
+            <td class="status" hx-get="/check" hx-vals='{"host":"{{$h.Name}}","file":"{{.File}}","s":"{{.Name}}","image":"{{.Image}}"}' hx-trigger="load" hx-swap="innerHTML"><span class="muted">checking…</span></td>
+            {{end}}
+          {{else}}<td class="muted">—</td>{{end}}
+          <td class="pincell">
+            <button class="pin-btn {{if .Pinned}}on{{end}}" hx-post="/pin"
+                    hx-vals='{"file":"{{.File}}","s":"{{.Name}}","pinned":"{{if .Pinned}}0{{else}}1{{end}}"}'
+                    hx-swap="outerHTML"
+                    hx-confirm="{{if .Pinned}}Unpin {{.Name}}?{{else}}Pin {{.Name}} at its current version?{{end}}"
+                    data-ok-label="{{if .Pinned}}Unpin{{else}}Pin{{end}}"
+                    title="Pinned services are skipped by update-all and auto-check">
+              <svg class="pin-ico" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M9.5 1.5l5 5-2 .5-3 3-.5 3-1.5-1.5L2.5 14l3.5-4.5L4.5 8l3-3 .5-2z" fill="currentColor"/></svg>
+              {{if .Pinned}}Pinned{{else}}Pin{{end}}
+            </button>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </details>
+  {{end}}
+</details>
 {{end}}
 {{end}}

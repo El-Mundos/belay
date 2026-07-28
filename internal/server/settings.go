@@ -102,30 +102,33 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, `<span class="ok">✅ test notification sent — check your device</span>`)
 }
 
+// handlePin pins/unpins a service (keyed by its compose file, so it works for local + remote).
 func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.project(r.FormValue("p"))
-	if !ok {
-		http.Error(w, "unknown project", http.StatusBadRequest)
-		return
+	file := r.FormValue("file")
+	if file == "" { // back-compat: local project id
+		if p, ok := s.project(r.FormValue("p")); ok {
+			file = p.File
+		}
 	}
 	svc := r.FormValue("s")
+	if file == "" || svc == "" {
+		http.Error(w, "missing file/service", http.StatusBadRequest)
+		return
+	}
 	pinned := r.FormValue("pinned") == "1"
-	_ = s.set.SetPin(p.File, svc, pinned)
-	// return the toggled button so htmx can swap it in place
+	_ = s.set.SetPin(file, svc, pinned)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	writePinButton(w, p.ID, svc, pinned)
+	writePinButton(w, file, svc, pinned)
 }
 
-// writePinButton renders the pin/unpin toggle for a service.
-func writePinButton(w http.ResponseWriter, pid int, svc string, pinned bool) {
-	next := "1"
-	label, cls := "📌 pin", "btn ghost"
+// writePinButton renders the pin/unpin toggle for a service (proper button + short confirm).
+func writePinButton(w http.ResponseWriter, file, svc string, pinned bool) {
+	next, label, cls, confirm := "1", "Pin", "pin-btn", "Pin "+svc+" at its current version?"
 	if pinned {
-		next = "0"
-		label, cls = "📌 pinned", "btn ghost pinned-on"
+		next, label, cls, confirm = "0", "Pinned", "pin-btn on", "Unpin "+svc+"?"
 	}
-	fmt.Fprintf(w, `<button class="%s" hx-post="/pin" hx-vals='{"p":"%d","s":"%s","pinned":"%s"}' hx-swap="outerHTML" title="Pinned services are skipped by update-all and auto-check">%s</button>`,
-		cls, pid, template.JSEscapeString(svc), next, label)
+	fmt.Fprintf(w, `<button class="%s" hx-post="/pin" hx-vals='{"file":%q,"s":%q,"pinned":"%s"}' hx-swap="outerHTML" hx-confirm="%s" data-ok-label="%s" title="Pinned services are skipped by update-all and auto-check"><svg class="pin-ico" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M9.5 1.5l5 5-2 .5-3 3-.5 3-1.5-1.5L2.5 14l3.5-4.5L4.5 8l3-3 .5-2z" fill="currentColor"/></svg>%s</button>`,
+		cls, file, svc, next, template.HTMLEscapeString(confirm), label, label)
 }
 
 // ---- auto-check ----

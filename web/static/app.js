@@ -1,6 +1,6 @@
 // Belay UI: a styled confirm modal (with optional changelog link) + client-side service search.
 (function () {
-  function modal(question, onOK, changelog) {
+  function modal(question, onOK, changelog, okLabel) {
     const ov = document.createElement("div");
     ov.className = "modal-overlay";
     ov.innerHTML =
@@ -8,9 +8,10 @@
       '<p class="modal-q"></p>' +
       '<div class="modal-actions">' +
       '<button class="btn ghost" data-cancel>Cancel</button>' +
-      '<button class="btn" data-ok>Update</button>' +
+      '<button class="btn" data-ok></button>' +
       "</div></div>";
     ov.querySelector(".modal-q").textContent = question;
+    ov.querySelector("[data-ok]").textContent = okLabel || "Confirm";
     if (changelog) {
       const a = document.createElement("a"); // built via DOM (no innerHTML injection)
       a.className = "modal-link";
@@ -30,19 +31,37 @@
     ov.querySelector("[data-ok]").focus();
   }
 
-  // Per-service Update buttons set hx-confirm — route that through our modal, with the changelog link.
+  // htmx elements with hx-confirm route through our modal (with changelog link + custom OK label).
   document.addEventListener("htmx:confirm", function (e) {
     if (!e.detail.question) return;
     e.preventDefault();
-    const cl = e.detail.elt && e.detail.elt.getAttribute("data-changelog");
-    modal(e.detail.question, () => e.detail.issueRequest(true), cl);
+    const el = e.detail.elt;
+    const cl = el && el.getAttribute("data-changelog");
+    const ok = (el && el.getAttribute("data-ok-label")) || "Confirm";
+    modal(e.detail.question, () => e.detail.issueRequest(true), cl, ok);
   });
 
-  // "Update all" is a plain form; confirm via the same modal.
-  window.belayConfirm = function (question, form) {
-    modal(question, () => form.submit());
+  // Plain forms (Update all, self-update) confirm via the same modal.
+  window.belayConfirm = function (question, form, okLabel) {
+    modal(question, () => form.submit(), null, okLabel || "Confirm");
     return false;
   };
+
+  // Review page: show/hide the per-version changelog blocks.
+  window.belayToggleChangelogs = function (on) {
+    document.querySelectorAll(".changelogs").forEach(function (d) { d.hidden = !on; });
+  };
+
+  // Remember which host/project groups are collapsed (per group key, in localStorage).
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("details[data-grp]").forEach(function (d) {
+      const k = "belay-grp:" + d.getAttribute("data-grp");
+      const v = localStorage.getItem(k);
+      if (v === "0") d.open = false;
+      else if (v === "1") d.open = true;
+      d.addEventListener("toggle", function () { localStorage.setItem(k, d.open ? "1" : "0"); });
+    });
+  });
 
   // Filter service rows on the Updates tab.
   window.belayFilter = function (q) {

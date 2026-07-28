@@ -5,15 +5,22 @@
 {{- else}}
   <span class="upd">→ {{.Latest}}{{if gt .Count 1}} <span class="muted">(+{{sub .Count 1}} more)</span>{{end}}</span>
   {{if .Changelog}}<a class="changelog" href="{{.Changelog}}" target="_blank" rel="noopener">changelog ↗</a>{{end}}
-  <button class="btn"
-          hx-post="/update"
+  {{if .Remote}}
+  <button class="btn" hx-post="/remote-update"
+          hx-vals='{"host":"{{.Host}}","file":"{{.File}}","s":"{{.Service}}","image":"{{.Image}}"}'
+          hx-target="closest td" hx-swap="innerHTML" hx-disabled-elt="this"
+          {{if .Changelog}}data-changelog="{{.Changelog}}"{{end}} data-ok-label="Update"
+          hx-confirm="Update {{.Service}} on {{.Host}} to {{.Latest}}? The agent health-checks and rolls back on failure.">
+    Update
+  </button>
+  {{else}}
+  <button class="btn" hx-post="/update"
           hx-vals='{"p":"{{.PID}}","s":"{{.Service}}","image":"{{.Target}}"}'
-          hx-target="#row-{{.PID}}-{{.Service}}"
-          hx-swap="outerHTML"
-          hx-disabled-elt="this"
-          {{if .Changelog}}data-changelog="{{.Changelog}}"{{end}}
+          hx-target="#row-{{.PID}}-{{.Service}}" hx-swap="outerHTML" hx-disabled-elt="this"
+          {{if .Changelog}}data-changelog="{{.Changelog}}"{{end}} data-ok-label="Update"
           hx-confirm="Update {{.Service}} to {{.Latest}}? It will roll back automatically if it fails to come up healthy.">
     Update
   </button>
+  {{end}}
 {{- end}}
 {{end}}

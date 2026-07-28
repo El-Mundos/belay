@@ -6,37 +6,16 @@
 on the other host.</p>
 {{end}}
 {{if and .AgentsEnabled (not .Hosts)}}<p class="muted">No agents connected yet.</p>{{end}}
+<div class="host-cards">
 {{range $h := .Hosts}}
-<section class="project">
-  <h2>{{$h.Host}}
-    {{if $h.Online}}<span class="badge-ok">● online</span>{{else}}<span class="muted">○ last seen {{$h.Ago}} ago</span>{{end}}
-  </h2>
-  {{range $p := $h.Projects}}
-  <table>
-    <thead><tr><th>service · {{$p.Name}}</th><th>image</th><th></th></tr></thead>
-    <tbody>
-    {{range $p.Services}}
-      <tr>
-        <td class="svc">{{.Name}}</td>
-        <td class="mono">{{if .Image}}{{.Image}}{{else}}<span class="muted">(build-only)</span>{{end}}</td>
-        <td class="pincell">
-          {{if and .Image $h.Online}}
-          <form hx-post="/remote-update" hx-target="find .out" hx-swap="innerHTML"
-                hx-confirm="Update {{.Name}} on {{$h.Host}}? The remote agent health-checks and auto-rolls-back on failure.">
-            <input type="hidden" name="host" value="{{$h.Host}}">
-            <input type="hidden" name="file" value="{{$p.File}}">
-            <input type="hidden" name="s" value="{{.Name}}">
-            <input type="hidden" name="image" value="{{.Image}}">
-            <button class="btn ghost" type="submit">check &amp; update</button>
-            <span class="out mono"></span>
-          </form>
-          {{end}}
-        </td>
-      </tr>
-    {{end}}
-    </tbody>
-  </table>
-  {{end}}
-</section>
+<div class="card host-card">
+  <h3>{{$h.Host}}
+    {{if $h.Online}}<span class="badge-ok">● online</span>{{else}}<span class="muted small">○ last seen {{$h.Ago}} ago</span>{{end}}
+  </h3>
+  <p class="muted small">{{len $h.Projects}} stack(s)</p>
+  <div class="chips">{{range $h.Projects}}<span class="chip">{{.Name}}</span>{{end}}</div>
+</div>
 {{end}}
+</div>
+{{if .Hosts}}<p class="muted small">Their services appear in the <a href="/">Updates</a> tab, grouped by host — update them from there.</p>{{end}}
 {{end}}
