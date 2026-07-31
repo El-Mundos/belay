@@ -7,8 +7,8 @@
     {{if .Remote}}<span class="chip">{{.Host}}</span>{{end}}
     <span class="mono muted">{{if .From}}{{.From}} → {{end}}{{.To}}</span>
     <span class="job-state">
-      {{if .Running}}<span class="spin">◌</span> updating… {{.Elapsed}}
-      {{else if eq .State "updated"}}<span class="ok">✅ updated</span>
+      {{if .Running}}<span class="spin">◌</span> {{if .Phase}}{{.Phase}}{{else}}updating…{{end}} <span class="muted">{{.Elapsed}}</span>
+      {{else if eq .State "updated"}}<span class="ok">✅ updated <span class="muted">{{.Elapsed}}</span></span>
       {{else if eq .State "rolled_back"}}<span class="err">↩ rolled back</span>
       {{else if eq .State "reverted"}}<span class="upd">↩ reverted</span>
       {{else if eq .State "error"}}<span class="err">❌ error</span>
@@ -16,7 +16,7 @@
       {{else}}<span class="muted">{{.State}}</span>{{end}}
     </span>
   </div>
-  {{if .Logs}}<details {{if .Running}}open{{end}}><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
+  {{if .Logs}}<details data-log="job-{{.ID}}"><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
 </div>
 {{end}}
 {{end}}

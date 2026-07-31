@@ -697,7 +697,10 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 	logCtx, stopLogs := context.WithCancel(ctx)
 	go s.streamLogs(logCtx, p.File, service, job) // live progress in the Activity tray
 
-	res := s.eng.SafeUpdate(ctx, engine.Request{Project: p.File, Service: service, FromImage: current, ToImage: target})
+	res := s.eng.SafeUpdate(ctx, engine.Request{
+		Project: p.File, Service: service, FromImage: current, ToImage: target,
+		OnPhase: func(ph string) { s.jobs.setPhase(job, ph) },
+	})
 	stopLogs()
 
 	if res.Outcome == engine.OutcomeUpdated {

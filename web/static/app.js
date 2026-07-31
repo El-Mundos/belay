@@ -97,6 +97,30 @@
     });
   };
 
+  // The Activity tray + History/Failed lists re-render on a poll; keep each log box's open state +
+  // scroll position (keyed by data-log) so they don't spring open or yank you to the top while you're
+  // reading. Auto-follow only if you were already at the bottom (live logs).
+  var preserveIds = { "activity-body": 1, "history-list": 1, "failed-list": 1 };
+  var logState = {};
+  document.addEventListener("htmx:beforeSwap", function (e) {
+    if (!e.target || !preserveIds[e.target.id]) return;
+    e.target.querySelectorAll("details[data-log]").forEach(function (d) {
+      var pre = d.querySelector("pre");
+      var atBottom = pre && (pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8);
+      logState[d.getAttribute("data-log")] = { open: d.open, scroll: pre ? pre.scrollTop : 0, atBottom: atBottom };
+    });
+  });
+  document.addEventListener("htmx:afterSwap", function (e) {
+    if (!e.target || !preserveIds[e.target.id]) return;
+    e.target.querySelectorAll("details[data-log]").forEach(function (d) {
+      var st = logState[d.getAttribute("data-log")];
+      if (!st) return;
+      d.open = st.open;
+      var pre = d.querySelector("pre");
+      if (pre) pre.scrollTop = st.atBottom ? pre.scrollHeight : st.scroll;
+    });
+  });
+
   // Show/hide the live Activity tray (browser-downloads style).
   window.belayToggleTray = function () {
     const tray = document.getElementById("activity-tray");

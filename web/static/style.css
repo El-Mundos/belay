@@ -171,3 +171,8 @@ details.projgroup table { border:none; border-radius:0; }
 .host-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:14px; }
 .host-card h3 { margin:0 0 6px; font-size:14px; display:flex; align-items:center; gap:8px; }
 .chips { margin-top:6px; }
+
+/* dedicated, consistent rollback slot on History rows */
+.rec-rollback { margin-left: 12px; min-width: 108px; text-align: right; flex: none; }
+.rec-rollback .rec-action { display: inline; margin: 0; }
+.rb-expired { cursor: not-allowed !important; }

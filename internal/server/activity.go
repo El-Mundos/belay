@@ -17,6 +17,7 @@ type Job struct {
 	Project, Service string
 	From, To         string
 	State            string // running | updated | rolled_back | error | reverted | skipped
+	Phase            string // live sub-status while running (snapshotting / pulling / health-checking…)
 	Logs             string
 	CmdID            string // remote command id, to correlate the agent's result back to this job
 	Started, Ended   time.Time
@@ -50,7 +51,7 @@ func (m *jobManager) startRemote(host, project, service, to, cmdID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seq++
-	j := &Job{ID: m.seq, Host: host, Project: project, Service: service, To: to, State: "running", CmdID: cmdID, Started: time.Now()}
+	j := &Job{ID: m.seq, Host: host, Project: project, Service: service, To: to, State: "running", Phase: "queued on " + host, CmdID: cmdID, Started: time.Now()}
 	m.jobs = append(m.jobs, j)
 	if len(m.jobs) > m.max {
 		m.jobs = m.jobs[len(m.jobs)-m.max:]
@@ -84,12 +85,18 @@ func (m *jobManager) start(project, service, from, to string) *Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seq++
-	j := &Job{ID: m.seq, Project: project, Service: service, From: from, To: to, State: "running", Started: time.Now()}
+	j := &Job{ID: m.seq, Project: project, Service: service, From: from, To: to, State: "running", Phase: "starting…", Started: time.Now()}
 	m.jobs = append(m.jobs, j)
 	if len(m.jobs) > m.max {
 		m.jobs = m.jobs[len(m.jobs)-m.max:]
 	}
 	return j
+}
+
+func (m *jobManager) setPhase(j *Job, phase string) {
+	m.mu.Lock()
+	j.Phase = phase
+	m.mu.Unlock()
 }
 
 func (m *jobManager) setLogs(j *Job, logs string) {

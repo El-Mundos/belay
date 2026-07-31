@@ -25,10 +25,17 @@ const (
 
 // Request describes a single service update.
 type Request struct {
-	Project   string // compose project name / directory
-	Service   string // compose service name
-	FromImage string // current image ref, e.g. "grafana/grafana-oss:13.0.2"
-	ToImage   string // target image ref, e.g. "grafana/grafana-oss:13.1.0"
+	Project   string             // compose project name / directory
+	Service   string             // compose service name
+	FromImage string             // current image ref, e.g. "grafana/grafana-oss:13.0.2"
+	ToImage   string             // target image ref, e.g. "grafana/grafana-oss:13.1.0"
+	OnPhase   func(phase string) // optional: reports the current stage (snapshotting/pulling/health…)
+}
+
+func (r Request) phase(p string) {
+	if r.OnPhase != nil {
+		r.OnPhase(p)
+	}
 }
 
 // Result is the outcome of an update attempt, including the logs captured during it.
@@ -93,10 +100,12 @@ func (e *Engine) SafeUpdate(ctx context.Context, r Request) Result {
 	// 0. snapshot the service's volumes so a rollback can restore data too
 	snap := ""
 	if e.Snapshot != nil {
+		r.phase("snapshotting volumes")
 		snap, _ = e.Snapshot.Snapshot(ctx, r)
 	}
 
 	// 1. move to the new tag and bring it up
+	r.phase("pulling & starting new version")
 	if err := e.Deployer.SetImage(ctx, r, r.ToImage); err != nil {
 		e.discard(ctx, r, snap)
 		return finish(OutcomeError, err)
@@ -106,6 +115,7 @@ func (e *Engine) SafeUpdate(ctx context.Context, r Request) Result {
 	}
 
 	// 2. health gate
+	r.phase("checking it came up healthy")
 	if err := e.Health.Wait(ctx, r); err != nil {
 		return e.rollback(ctx, r, &res, start, err, snap)
 	}
@@ -160,6 +170,7 @@ func (e *Engine) rollback(ctx context.Context, r Request, res *Result, start tim
 		res.Outcome, res.Err, res.Duration = OutcomeError, err, time.Since(start)
 		return *res
 	}
+	r.phase("unhealthy — rolling back")
 	if logs, err := e.Deployer.Logs(ctx, r, 200); err == nil {
 		res.Logs = logs
 	}

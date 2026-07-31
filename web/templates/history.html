@@ -1,5 +1,6 @@
 {{define "content"}}
 <h2 class="tabhead">Upgrade history</h2>
+<div id="history-list" hx-get="/history" hx-trigger="every 6s" hx-select="#history-list" hx-target="#history-list" hx-swap="outerHTML">
 {{if not .Records}}<p class="muted">No successful upgrades yet.</p>{{end}}
 {{range .Records}}
 <div class="record ok">
@@ -8,18 +9,22 @@
     <span class="mono"><span class="muted">{{.From}}</span> → <span class="ok">{{.To}}</span></span>
     {{if eq .Outcome "reverted"}}<span class="badge-rev">↩ reverted</span>{{else}}<span class="badge-ok">✅ updated</span>{{end}}
     <span class="muted time">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}} · {{.Duration}}</span>
-    {{if .CanRollback}}
-      <form method="post" action="/rollback" class="rec-action"
-            hx-confirm="Roll {{.Service}} back to {{.From}}? This restores the pre-update data snapshot too.">
-        <input type="hidden" name="p" value="{{.PID}}">
-        <input type="hidden" name="s" value="{{.Service}}">
-        <button class="btn warn" title="{{.Expires}}">↩ Roll back</button>
-      </form>
-    {{else if .Superseded}}
-      <button class="btn ghost" disabled title="A newer update replaced this rollback point">↩ Roll back</button>
-    {{end}}
+    <span class="rec-rollback">
+      {{if .CanRollback}}
+        <form method="post" action="/rollback" class="rec-action" data-ok-label="Roll back"
+              hx-confirm="Roll {{.Service}} back to {{.From}}? This restores the pre-update data snapshot too.">
+          <input type="hidden" name="p" value="{{.PID}}">
+          <input type="hidden" name="s" value="{{.Service}}">
+          <button class="btn warn" title="{{.Expires}}">↩ Roll back</button>
+        </form>
+      {{else if eq .Outcome "updated"}}
+        <button class="btn ghost rb-expired" disabled
+                title="{{if .Superseded}}Superseded by a newer update — rollback no longer available{{else}}Rollback window expired{{end}}">↩ Roll back</button>
+      {{end}}
+    </span>
   </div>
-  {{if .Logs}}<details><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
+  {{if .Logs}}<details data-log="rec-{{.ID}}"><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
 </div>
 {{end}}
+</div>
 {{end}}

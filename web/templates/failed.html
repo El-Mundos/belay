@@ -1,5 +1,6 @@
 {{define "content"}}
 <h2 class="tabhead">Failed updates</h2>
+<div id="failed-list" hx-get="/failed" hx-trigger="every 6s" hx-select="#failed-list" hx-target="#failed-list" hx-swap="outerHTML">
 {{if not .Records}}<p class="muted">No failed updates. 🎉</p>{{end}}
 {{range .Records}}
 <div class="record fail">
@@ -10,7 +11,8 @@
     <span class="muted time">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}}</span>
   </div>
   {{if .Err}}<div class="rec-err">{{.Err}}</div>{{end}}
-  {{if .Logs}}<details open><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
+  {{if .Logs}}<details data-log="rec-{{.ID}}"><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
 </div>
 {{end}}
+</div>
 {{end}}
