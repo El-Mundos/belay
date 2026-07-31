@@ -13,12 +13,16 @@ import (
 // "running", streams the service's container logs while the engine works, and ends on an outcome.
 type Job struct {
 	ID               int
+	Host             string // "" for local; agent host for remote
 	Project, Service string
 	From, To         string
 	State            string // running | updated | rolled_back | error | reverted | skipped
 	Logs             string
+	CmdID            string // remote command id, to correlate the agent's result back to this job
 	Started, Ended   time.Time
 }
+
+func (j Job) Remote() bool { return j.Host != "" }
 
 func (j Job) Running() bool { return j.State == "running" }
 func (j Job) Elapsed() string {
@@ -31,13 +35,50 @@ func (j Job) Elapsed() string {
 
 // jobManager holds the recent jobs for the Activity tray. All mutation goes through it under a lock.
 type jobManager struct {
-	mu   sync.Mutex
-	seq  int
-	jobs []*Job
-	max  int
+	mu    sync.Mutex
+	seq   int
+	jobs  []*Job
+	max   int
+	byCmd map[string]*Job // remote jobs awaiting their agent result, by command id
 }
 
-func newJobManager() *jobManager { return &jobManager{max: 50} }
+func newJobManager() *jobManager { return &jobManager{max: 50, byCmd: map[string]*Job{}} }
+
+// startRemote records a remote (agent) update as a running job so it shows in the Activity tray
+// immediately, correlated to its command id so the agent's result can finish it.
+func (m *jobManager) startRemote(host, project, service, to, cmdID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.seq++
+	j := &Job{ID: m.seq, Host: host, Project: project, Service: service, To: to, State: "running", CmdID: cmdID, Started: time.Now()}
+	m.jobs = append(m.jobs, j)
+	if len(m.jobs) > m.max {
+		m.jobs = m.jobs[len(m.jobs)-m.max:]
+	}
+	m.byCmd[cmdID] = j
+}
+
+// finishCmd completes the remote job matching an agent result.
+func (m *jobManager) finishCmd(cmdID, state, from, to, logs string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j := m.byCmd[cmdID]
+	if j == nil {
+		return
+	}
+	j.State = state
+	if from != "" {
+		j.From = from
+	}
+	if to != "" {
+		j.To = to
+	}
+	if strings.TrimSpace(logs) != "" {
+		j.Logs = logs
+	}
+	j.Ended = time.Now()
+	delete(m.byCmd, cmdID)
+}
 
 func (m *jobManager) start(project, service, from, to string) *Job {
 	m.mu.Lock()

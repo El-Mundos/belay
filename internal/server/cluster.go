@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -103,6 +104,7 @@ func (s *Server) handleAgentResult(w http.ResponseWriter, r *http.Request) {
 			Outcome: res.Outcome, Error: res.Err, Logs: res.Logs,
 		})
 	}
+	s.jobs.finishCmd(res.CommandID, res.Outcome, res.From, res.To, res.Logs) // complete the Activity job
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -178,8 +180,10 @@ func (s *Server) enqueue(host, file, service, image string) bool {
 	if c == nil {
 		return false
 	}
+	cmd := cluster.Command{ID: newToken()[:12], Kind: "update", Project: file, Service: service, Image: image}
 	select {
-	case c.queue <- cluster.Command{ID: newToken()[:12], Kind: "update", Project: file, Service: service, Image: image}:
+	case c.queue <- cmd:
+		s.jobs.startRemote(host, filepath.Base(filepath.Dir(file)), service, image, cmd.ID) // show in Activity tray
 		return true
 	default:
 		return false

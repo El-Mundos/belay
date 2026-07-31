@@ -1,36 +1,28 @@
 {{define "content"}}
 <h2 class="tabhead">Update all — review</h2>
-{{if eq .Count 0}}
-  <div class="card">
-    <p class="ok">Nothing to update — everything is on its newest stable version. 🎉</p>
-    <a class="btn ghost" href="/">Back to Updates</a>
-  </div>
-{{else}}
 <div class="toolbar">
   <label class="cl-toggle"><input type="checkbox" onchange="belayToggleChangelogs(this.checked)"> show changelogs</label>
-  <form method="post" action="/update-all" onsubmit="return belayConfirm('Update all {{.Count}} service(s)? Each is health-checked and rolls back automatically if it fails.', this)">
-    <button class="btn" type="submit">Update all {{.Count}}</button>
+  <form method="post" action="/update-all" onsubmit="return belayConfirm('Update every service with a newer version? Each is health-checked and rolls back automatically if it fails.', this)">
+    <button class="btn" type="submit" id="update-all-btn" disabled>Checking <span id="rev-progress">0/{{.Count}}</span>…</button>
   </form>
   <a class="btn ghost" href="/">Cancel</a>
 </div>
-<p class="muted small">{{.Count}} service(s) with a newer stable version. Toggle changelogs to review each version step before updating.</p>
-{{range .Updates}}
-<div class="review-item">
-  <div class="rec-head">
-    <span class="svc">{{.Service}}</span>
-    {{if not .Local}}<span class="chip">{{.Host}}</span>{{end}}
-    <span class="muted small">{{.Project}}</span>
-    <span class="mono time"><span class="muted">{{.From}}</span> → <span class="upd">{{.Latest}}</span></span>
+{{if eq .Count 0}}<p class="muted">No services to check.</p>{{end}}
+<p class="muted small" id="rev-hint">Checking every service for a newer version… the button unlocks when the scan finishes.</p>
+<div id="review-list" data-total="{{.Count}}">
+  {{range .Services}}
+  <div class="review-item" data-done="0">
+    <div class="rec-head">
+      <span class="svc">{{.Service}}</span>
+      {{if not .Local}}<span class="chip">{{.Host}}</span>{{end}}
+      <span class="muted small">{{.Project}}</span>
+      <span class="rev-status status time"
+            hx-get="/review/check"
+            hx-vals='{{if .Local}}{"p":"{{.PID}}","s":"{{.Service}}"}{{else}}{"host":"{{.Host}}","file":"{{.File}}","s":"{{.Service}}","image":"{{.Image}}"}{{end}}'
+            hx-trigger="load" hx-swap="innerHTML"
+            hx-on::after-request="belayReviewChecked(this)"><span class="muted">checking…</span></span>
+    </div>
   </div>
-  <div class="changelogs" hidden>
-    {{range .Steps}}
-      <div class="clstep">
-        <span class="mono">{{.Version}}</span>
-        {{if .Changelog}}<a href="{{.Changelog}}" target="_blank" rel="noopener">changelog ↗</a>{{else}}<span class="muted small">no changelog link</span>{{end}}
-      </div>
-    {{end}}
-  </div>
+  {{end}}
 </div>
-{{end}}
-{{end}}
 {{end}}

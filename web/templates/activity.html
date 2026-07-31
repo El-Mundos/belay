@@ -4,7 +4,8 @@
 <div class="job job-{{.State}}">
   <div class="job-head">
     <span class="svc">{{.Service}}</span>
-    <span class="mono muted">{{.From}} → {{.To}}</span>
+    {{if .Remote}}<span class="chip">{{.Host}}</span>{{end}}
+    <span class="mono muted">{{if .From}}{{.From}} → {{end}}{{.To}}</span>
     <span class="job-state">
       {{if .Running}}<span class="spin">◌</span> updating… {{.Elapsed}}
       {{else if eq .State "updated"}}<span class="ok">✅ updated</span>

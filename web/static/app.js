@@ -52,6 +52,32 @@
     document.querySelectorAll(".changelogs").forEach(function (d) { d.hidden = !on; });
   };
 
+  // Review page: called after each service's check returns. Tracks progress, hides up-to-date rows,
+  // and unlocks "Update all" once every service has been checked.
+  window.belayReviewChecked = function (el) {
+    var list = document.getElementById("review-list");
+    if (!list) return;
+    var item = el.closest(".review-item");
+    if (item) item.setAttribute("data-done", "1");
+    var mark = el.querySelector("[data-updatable]");
+    var updatable = mark && mark.getAttribute("data-updatable") === "1";
+    if (item && !updatable) item.style.display = "none"; // hide up-to-date / errored services
+    var total = parseInt(list.getAttribute("data-total") || "0", 10);
+    var done = list.querySelectorAll('.review-item[data-done="1"]').length;
+    var prog = document.getElementById("rev-progress");
+    if (prog) prog.textContent = done + "/" + total;
+    if (done >= total) {
+      var n = list.querySelectorAll('.review-item [data-updatable="1"]').length;
+      var btn = document.getElementById("update-all-btn");
+      var hint = document.getElementById("rev-hint");
+      if (btn) {
+        if (n > 0) { btn.disabled = false; btn.textContent = "Update all " + n; }
+        else { btn.textContent = "Nothing to update"; btn.classList.add("ghost"); }
+      }
+      if (hint) hint.textContent = n > 0 ? (n + " service(s) with a newer version.") : "Everything is up to date. 🎉";
+    }
+  };
+
   // Remember which host/project groups are collapsed (per group key, in localStorage).
   document.addEventListener("DOMContentLoaded", function () {
     document.querySelectorAll("details[data-grp]").forEach(function (d) {

@@ -127,16 +127,17 @@ func New(cfg Config) *Server {
 		set:    set,
 		notify: notify.New(func() config.Notify { return set.Get().Notify }),
 		tpl: map[string]*template.Template{
-			"dashboard": page("templates/layout.html", "templates/dashboard.html"),
-			"failed":    page("templates/layout.html", "templates/failed.html"),
-			"history":   page("templates/layout.html", "templates/history.html"),
-			"login":     page("templates/layout.html", "templates/login.html"),
-			"settings":  page("templates/layout.html", "templates/settings.html"),
-			"status":    page("templates/status.html"),
-			"result":    page("templates/result.html"),
-			"activity":  page("templates/activity.html"),
-			"hosts":     page("templates/layout.html", "templates/hosts.html"),
-			"review":    page("templates/layout.html", "templates/review.html"),
+			"dashboard":    page("templates/layout.html", "templates/dashboard.html"),
+			"failed":       page("templates/layout.html", "templates/failed.html"),
+			"history":      page("templates/layout.html", "templates/history.html"),
+			"login":        page("templates/layout.html", "templates/login.html"),
+			"settings":     page("templates/layout.html", "templates/settings.html"),
+			"status":       page("templates/status.html"),
+			"result":       page("templates/result.html"),
+			"activity":     page("templates/activity.html"),
+			"hosts":        page("templates/layout.html", "templates/hosts.html"),
+			"review":       page("templates/layout.html", "templates/review.html"),
+			"reviewstatus": page("templates/reviewstatus.html"),
 		},
 		sess:   map[string]struct{}{},
 		checks: map[string]checkResult{},
@@ -158,6 +159,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /history", s.guard(s.handleHistory))
 	mux.HandleFunc("GET /check", s.guard(s.handleCheck))
 	mux.HandleFunc("GET /review", s.guard(s.handleReview))
+	mux.HandleFunc("GET /review/check", s.guard(s.handleReviewCheck))
 	mux.HandleFunc("POST /update", s.guard(s.handleUpdate))
 	mux.HandleFunc("POST /update-all", s.guard(s.handleUpdateAll))
 	mux.HandleFunc("POST /rollback", s.guard(s.handleRollback))
@@ -576,14 +578,93 @@ func (s *Server) pendingUpdates(ctx context.Context) []pendingUpd {
 	return out
 }
 
-// handleReview shows the pre-update review: everything that would be updated, with per-version
-// changelogs, or "nothing to update".
+// reviewRow is one service on the progressive review page; its update status loads per-row via htmx.
+type reviewRow struct {
+	Local          bool
+	Host, Project  string
+	Service, Image string
+	PID            int
+	File           string
+}
+
+// handleReview renders the review page INSTANTLY (no registry calls) — a list of every candidate
+// service; each row then checks itself via /review/check, and the "Update all" button stays disabled
+// until every row has reported.
 func (s *Server) handleReview(w http.ResponseWriter, r *http.Request) {
-	ups := s.pendingUpdates(r.Context())
+	var rows []reviewRow
+	for _, p := range s.cfg.Projects {
+		services, err := compose.Services(p.File)
+		if err != nil {
+			continue
+		}
+		for _, sv := range services {
+			if sv.Image == "" || !strings.Contains(sv.Image, ":") || s.set.Pinned(p.File, sv.Name) {
+				continue
+			}
+			rows = append(rows, reviewRow{Local: true, Project: p.Name, Service: sv.Name, Image: sv.Image, PID: p.ID, File: p.File})
+		}
+	}
+	s.agentsMu.Lock()
+	agents := make([]*agentConn, 0, len(s.agents))
+	for _, c := range s.agents {
+		agents = append(agents, c)
+	}
+	s.agentsMu.Unlock()
+	sort.Slice(agents, func(i, j int) bool { return agents[i].host < agents[j].host })
+	for _, c := range agents {
+		for _, p := range c.projects {
+			for _, sv := range p.Services {
+				if sv.Image == "" || !strings.Contains(sv.Image, ":") || s.set.Pinned(p.File, sv.Name) {
+					continue
+				}
+				rows = append(rows, reviewRow{Host: c.host, Project: p.Name, Service: sv.Name, Image: sv.Image, PID: -1, File: p.File})
+			}
+		}
+	}
 	data := s.base(r, "updates")
-	data["Updates"] = ups
-	data["Count"] = len(ups)
+	data["Services"] = rows
+	data["Count"] = len(rows)
 	s.render(w, "review", data)
+}
+
+// handleReviewCheck checks one service for the review page (local ?p=&s= or remote ?host=&file=&s=&image=).
+func (s *Server) handleReviewCheck(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	host, service := q.Get("host"), q.Get("s")
+	var image string
+	if host == "" {
+		p, ok := s.project(q.Get("p"))
+		if !ok {
+			http.Error(w, "unknown project", http.StatusBadRequest)
+			return
+		}
+		var err error
+		if image, err = compose.FindImage(p.File, service); err != nil {
+			s.render(w, "reviewstatus", map[string]any{"Err": err.Error()})
+			return
+		}
+	} else {
+		image = q.Get("image")
+	}
+	ref := registry.ParseRef(image)
+	newer, comparable, err := s.reg.Newer(r.Context(), ref)
+	view := map[string]any{"Service": service, "From": ref.Tag}
+	switch {
+	case err != nil:
+		view["Err"] = err.Error()
+	case comparable && len(newer) > 0:
+		view["Updatable"] = true
+		view["Latest"] = newer[len(newer)-1]
+		if src, e := s.reg.SourceRepo(r.Context(), ref); e == nil && src != "" {
+			type step struct{ Version, Changelog string }
+			steps := make([]step, 0, len(newer))
+			for _, v := range newer {
+				steps = append(steps, step{Version: v, Changelog: registry.ChangelogURL(src, v)})
+			}
+			view["Steps"] = steps
+		}
+	}
+	s.render(w, "reviewstatus", view)
 }
 
 // handleUpdateAll applies every pending update (local runs the engine; remote is enqueued to its
@@ -690,7 +771,7 @@ func (s *Server) project(id string) (Project, bool) {
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	root := "layout.html"
-	if name == "status" || name == "result" || name == "activity" {
+	if name == "status" || name == "result" || name == "activity" || name == "reviewstatus" {
 		root = name
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
