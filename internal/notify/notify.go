@@ -30,15 +30,19 @@ type Event struct {
 // Notifier reads the live Notify config on each send, so changes in the settings page take effect
 // immediately. A nil Notifier or a disabled/empty config is a no-op.
 type Notifier struct {
-	cfg  func() config.Notify
-	http *http.Client
+	cfg   func() config.Notify
+	quiet func() bool // suppress non-critical notifications during quiet hours
+	http  *http.Client
 }
 
-func New(cfg func() config.Notify) *Notifier {
-	return &Notifier{cfg: cfg, http: &http.Client{Timeout: 10 * time.Second}}
+func New(cfg func() config.Notify, quiet func() bool) *Notifier {
+	return &Notifier{cfg: cfg, quiet: quiet, http: &http.Client{Timeout: 10 * time.Second}}
 }
+
+func (n *Notifier) quieted() bool { return n.quiet != nil && n.quiet() }
 
 // Failure fires a notification about a failed/rolled-back update (async; never blocks the update).
+// Failures ignore quiet hours — they're the ones you want any time.
 func (n *Notifier) Failure(e Event) {
 	if n == nil {
 		return
@@ -55,13 +59,27 @@ func (n *Notifier) Failure(e Event) {
 	go n.post(c, title, msg, "warning")
 }
 
-// NewVersion fires a notification that a newer version is available (from auto-check).
+// Success fires a notification about a successful update (respects quiet hours).
+func (n *Notifier) Success(project, service, from, to string) {
+	if n == nil {
+		return
+	}
+	c := n.cfg()
+	if !c.Enabled || !c.OnSuccess || c.URL == "" || n.quieted() {
+		return
+	}
+	title := fmt.Sprintf("Belay: %s updated", service)
+	msg := fmt.Sprintf("%s: %s → %s (on %s)", service, from, to, project)
+	go n.post(c, title, msg, "white_check_mark")
+}
+
+// NewVersion fires a notification that a newer version is available (respects quiet hours).
 func (n *Notifier) NewVersion(project, service, from, to string) {
 	if n == nil {
 		return
 	}
 	c := n.cfg()
-	if !c.Enabled || !c.OnNewVersion || c.URL == "" {
+	if !c.Enabled || !c.OnNewVersion || c.URL == "" || n.quieted() {
 		return
 	}
 	title := fmt.Sprintf("Belay: update available for %s", service)
@@ -130,6 +148,12 @@ func build(c config.Notify, title, msg, tag string) (ctype string, body []byte, 
 		return "application/json", b, nil
 	case "generic":
 		b, _ := json.Marshal(map[string]string{"title": title, "message": msg})
+		return "application/json", b, nil
+	case "alertmanager": // POST the URL should be <alertmanager>/api/v2/alerts — shows up in Karma
+		b, _ := json.Marshal([]map[string]any{{
+			"labels":      map[string]string{"alertname": "Belay", "severity": "warning", "source": "belay"},
+			"annotations": map[string]string{"summary": title, "description": msg},
+		}})
 		return "application/json", b, nil
 	default: // ntfy: plain-text body + headers
 		return "text/plain", []byte(msg), map[string]string{"Title": title, "Tags": tag}

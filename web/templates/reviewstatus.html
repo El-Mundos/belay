@@ -3,6 +3,7 @@
 {{- else if .Updatable}}
   <span data-updatable="1"><span class="muted">{{.From}}</span> → <span class="upd">{{.Latest}}</span></span>
   {{if .Steps}}<div class="changelogs" hidden>{{range .Steps}}<div class="clstep"><span class="mono">{{.Version}}</span>{{if .Changelog}}<a href="{{.Changelog}}" target="_blank" rel="noopener">changelog ↗</a>{{end}}</div>{{end}}</div>{{end}}
+{{- else if .MajorOnly}}<span class="muted" data-updatable="0">major {{.MajorOnly}} available — update manually</span>
 {{- else}}<span class="muted" data-updatable="0">up to date</span>
 {{- end}}
 {{end}}

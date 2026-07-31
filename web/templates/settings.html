@@ -12,32 +12,44 @@
       <option value="discord" {{if eq $k "discord"}}selected{{end}}>Discord</option>
       <option value="slack" {{if eq $k "slack"}}selected{{end}}>Slack</option>
       <option value="gotify" {{if eq $k "gotify"}}selected{{end}}>Gotify</option>
+      <option value="alertmanager" {{if eq $k "alertmanager"}}selected{{end}}>Alertmanager (→ Karma)</option>
       <option value="generic" {{if eq $k "generic"}}selected{{end}}>Generic JSON</option>
     </select>
   </label>
   <label>Webhook / topic URL
-    <input type="text" name="notify_url" value="{{.S.Notify.URL}}" placeholder="https://ntfy.sh/my-belay-topic">
+    <input type="text" name="notify_url" value="{{.S.Notify.URL}}" placeholder="ntfy: https://ntfy.sh/topic · alertmanager: http://alertmanager:9093/api/v2/alerts">
   </label>
-  <label class="check"><input type="checkbox" name="on_failure" {{if .S.Notify.OnFailure}}checked{{end}}> Notify on failed / rolled-back updates</label>
+  <label class="check"><input type="checkbox" name="on_failure" {{if .S.Notify.OnFailure}}checked{{end}}> Notify on failed / rolled-back updates <span class="muted small">(sent even in quiet hours)</span></label>
+  <label class="check"><input type="checkbox" name="on_success" {{if .S.Notify.OnSuccess}}checked{{end}}> Notify on successful updates</label>
   <label class="check"><input type="checkbox" name="on_new_version" {{if .S.Notify.OnNewVersion}}checked{{end}}> Notify when a new version is available</label>
-  <div class="actions">
-    <button class="btn" type="submit">Save</button>
-    <button class="btn ghost" type="button" hx-post="/settings/test" hx-target="#notify-test" hx-swap="innerHTML">Send test</button>
-    <span id="notify-test" class="mono"></span>
-  </div>
-</form>
+  <span id="notify-test" class="mono"></span>
 
-<form method="post" action="/settings" class="card">
-  <h3>Automation</h3>
+  <h3 style="margin-top:22px">Automation</h3>
   <label>Auto-check for updates every
-    <input type="number" class="num" name="auto_check_hours" min="0" value="{{.S.AutoCheckHours}}"> hours
-    <span class="muted">(0 = off; caches results &amp; notifies on new versions)</span>
+    <input type="number" class="num" name="auto_check_hours" min="0" value="{{.S.AutoCheckHours}}"> hours <span class="muted">(0 = off)</span>
   </label>
   <label>Keep manual rollback available for
-    <input type="number" class="num" name="rollback_window_hours" min="0" value="{{.S.RollbackWindowHours}}"> hours
-    <span class="muted">(0 = off)</span>
+    <input type="number" class="num" name="rollback_window_hours" min="0" value="{{.S.RollbackWindowHours}}"> hours <span class="muted">(0 = off)</span>
   </label>
-  <div class="actions"><button class="btn" type="submit">Save</button></div>
+  <label>Update-all runs
+    <input type="number" class="num" name="concurrency" min="1" value="{{if .S.Concurrency}}{{.S.Concurrency}}{{else}}1{{end}}"> service(s) in parallel
+  </label>
+  <label class="check"><input type="checkbox" name="allow_major" {{if .S.AllowMajor}}checked{{end}}> Include <b>major</b> version bumps in "Update all" <span class="muted small">(off is safer — majors need a manual click)</span></label>
+  <label class="check"><input type="checkbox" name="quiet_hours" {{if .S.QuietHours}}checked{{end}}> Quiet hours — suppress non-failure notifications</label>
+  <label>Quiet from
+    <input type="number" class="num" name="quiet_start" min="0" max="23" value="{{.S.QuietStart}}"> to
+    <input type="number" class="num" name="quiet_end" min="0" max="23" value="{{.S.QuietEnd}}"> <span class="muted">(hour, 24h)</span>
+  </label>
+
+  <h3 style="margin-top:22px">Advanced</h3>
+  <label>Protect <code>/metrics</code> with a token <span class="muted small">(blank = open)</span>
+    <input type="text" name="metrics_token" value="{{.S.MetricsToken}}" placeholder="a secret — then scrape /metrics?token=…">
+  </label>
+
+  <div class="actions">
+    <button class="btn" type="submit">Save settings</button>
+    <button class="btn ghost" type="button" hx-post="/settings/test" hx-target="#notify-test" hx-swap="innerHTML">Send test notification</button>
+  </div>
 </form>
 
 <form method="post" action="/settings" class="card">

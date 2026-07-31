@@ -19,6 +19,7 @@ type Notify struct {
 	Kind         string `json:"kind"`           // auto | ntfy | discord | slack | gotify | generic
 	OnFailure    bool   `json:"on_failure"`     // notify when an update fails / rolls back
 	OnNewVersion bool   `json:"on_new_version"` // notify when auto-check finds a newer version
+	OnSuccess    bool   `json:"on_success"`     // notify when an update succeeds
 }
 
 // Probe is an optional health check for a service, forming the middle rung of the health ladder
@@ -33,9 +34,26 @@ type Probe struct {
 type Settings struct {
 	RollbackWindowHours int              `json:"rollback_window_hours"` // 0 = retention off
 	AutoCheckHours      int              `json:"auto_check_hours"`      // 0 = auto-check off
+	AllowMajor          bool             `json:"allow_major"`           // include major version bumps in update-all
+	QuietHours          bool             `json:"quiet_hours"`           // suppress notifications during the window
+	QuietStart          int              `json:"quiet_start"`           // hour 0-23
+	QuietEnd            int              `json:"quiet_end"`             // hour 0-23
+	Concurrency         int              `json:"concurrency"`           // parallel updates in update-all (min 1)
+	MetricsToken        string           `json:"metrics_token"`         // if set, /metrics requires ?token= or Bearer
 	Notify              Notify           `json:"notify"`
 	Pins                map[string]bool  `json:"pins"`   // key = project\x00service → ignored for updates
 	Probes              map[string]Probe `json:"probes"` // key = project\x00service
+}
+
+// InQuietHours reports whether the given hour (0-23) is inside the notification quiet window.
+func (s Settings) InQuietHours(hour int) bool {
+	if !s.QuietHours || s.QuietStart == s.QuietEnd {
+		return false
+	}
+	if s.QuietStart < s.QuietEnd {
+		return hour >= s.QuietStart && hour < s.QuietEnd
+	}
+	return hour >= s.QuietStart || hour < s.QuietEnd // window wraps midnight
 }
 
 // Store wraps Settings with a file path and a mutex.
@@ -53,6 +71,7 @@ func Defaults() Settings {
 	return Settings{
 		RollbackWindowHours: 24,
 		AutoCheckHours:      0,
+		Concurrency:         1,
 		Notify:              Notify{Enabled: true, Kind: "auto", OnFailure: true, OnNewVersion: true},
 		Pins:                map[string]bool{},
 		Probes:              map[string]Probe{},

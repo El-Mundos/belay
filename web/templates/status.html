@@ -4,6 +4,7 @@
 {{- else if not .Latest}}<span class="ok">✓ up to date</span>
 {{- else}}
   <span class="upd">→ {{.Latest}}{{if gt .Count 1}} <span class="muted">(+{{sub .Count 1}} more)</span>{{end}}</span>
+  {{if .Major}}<span class="major-tag" title="Major version bump — excluded from Update all; review before updating">major</span>{{end}}
   {{if .Changelog}}<a class="changelog" href="{{.Changelog}}" target="_blank" rel="noopener">changelog ↗</a>{{end}}
   {{if .Remote}}
   <button class="btn" hx-post="/remote-update"

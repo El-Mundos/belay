@@ -85,8 +85,15 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 			st.Notify.Kind = r.FormValue("notify_kind")
 			st.Notify.OnFailure = r.FormValue("on_failure") == "on"
 			st.Notify.OnNewVersion = r.FormValue("on_new_version") == "on"
+			st.Notify.OnSuccess = r.FormValue("on_success") == "on"
 			st.AutoCheckHours = atoiDefault(r.FormValue("auto_check_hours"), 0)
 			st.RollbackWindowHours = atoiDefault(r.FormValue("rollback_window_hours"), 24)
+			st.AllowMajor = r.FormValue("allow_major") == "on"
+			st.QuietHours = r.FormValue("quiet_hours") == "on"
+			st.QuietStart = atoiDefault(r.FormValue("quiet_start"), 0)
+			st.QuietEnd = atoiDefault(r.FormValue("quiet_end"), 0)
+			st.Concurrency = atoiDefault(r.FormValue("concurrency"), 1)
+			st.MetricsToken = strings.TrimSpace(r.FormValue("metrics_token"))
 		})
 	}
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
@@ -224,6 +231,16 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 // ---- metrics ----
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if tok := s.set.Get().MetricsToken; tok != "" {
+		got := r.URL.Query().Get("token")
+		if got == "" {
+			got = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
+		if got != tok {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
 	totals := s.store.Totals()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprint(w, "# HELP belay_pending_updates Services with a newer stable version available (from auto-check).\n")

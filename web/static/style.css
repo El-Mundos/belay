@@ -176,3 +176,8 @@ details.projgroup table { border:none; border-radius:0; }
 .rec-rollback { margin-left: 12px; min-width: 108px; text-align: right; flex: none; }
 .rec-rollback .rec-action { display: inline; margin: 0; }
 .rb-expired { cursor: not-allowed !important; }
+
+/* major version bump indicator */
+.major-tag { display:inline-block; margin-left:8px; padding:1px 7px; border-radius:10px; font-size:11px;
+  font-weight:600; background:color-mix(in srgb, var(--err) 18%, transparent); color:var(--err);
+  border:1px solid var(--err); }

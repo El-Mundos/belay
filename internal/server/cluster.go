@@ -98,11 +98,14 @@ func (s *Server) handleAgentResult(w http.ResponseWriter, r *http.Request) {
 		Project: label, Service: res.Service, From: res.From, To: res.To,
 		Outcome: res.Outcome, Err: res.Err, Logs: res.Logs, Duration: res.Duration,
 	})
-	if res.Outcome == "rolled_back" || res.Outcome == "error" {
+	switch res.Outcome {
+	case "rolled_back", "error":
 		s.notify.Failure(notify.Event{
 			Project: label, Service: res.Service, From: res.From, To: res.To,
 			Outcome: res.Outcome, Error: res.Err, Logs: res.Logs,
 		})
+	case "updated":
+		s.notify.Success(label, res.Service, res.From, res.To)
 	}
 	s.jobs.finishCmd(res.CommandID, res.Outcome, res.From, res.To, res.Logs) // complete the Activity job
 	w.WriteHeader(http.StatusNoContent)

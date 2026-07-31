@@ -120,12 +120,15 @@ func New(cfg Config) *Server {
 		eng.Snapshot = agent.Snapshotter{} // snapshot volumes -> restore data on rollback
 	}
 	return &Server{
-		cfg:    cfg,
-		reg:    registry.New(),
-		eng:    eng,
-		store:  store.Open(storePath),
-		set:    set,
-		notify: notify.New(func() config.Notify { return set.Get().Notify }),
+		cfg:   cfg,
+		reg:   registry.New(),
+		eng:   eng,
+		store: store.Open(storePath),
+		set:   set,
+		notify: notify.New(
+			func() config.Notify { return set.Get().Notify },
+			func() bool { return set.Get().InQuietHours(time.Now().Hour()) },
+		),
 		tpl: map[string]*template.Template{
 			"dashboard":    page("templates/layout.html", "templates/dashboard.html"),
 			"failed":       page("templates/layout.html", "templates/failed.html"),
@@ -476,6 +479,11 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		view["Latest"] = latest
 		view["Count"] = len(newer)
 		view["Target"] = strings.TrimSuffix(image, ":"+ref.Tag) + ":" + latest
+		if cm, ok := majorOf(ref.Tag); ok {
+			if lm, ok := majorOf(latest); ok && lm != cm {
+				view["Major"] = true // major bump — excluded from "update all", needs a manual click
+			}
+		}
 		if src, e := s.reg.SourceRepo(r.Context(), ref); e == nil && src != "" {
 			view["Changelog"] = registry.ChangelogURL(src, latest)
 		}
@@ -528,8 +536,43 @@ type pendingUpd struct {
 
 // pendingUpdates scans every non-pinned service across the local host and all agents and returns the
 // ones with a newer stable version, including the changelog for each intermediate version.
+// filterMajor drops candidate tags whose major version differs from current when major bumps aren't
+// allowed. Returns the kept list and the highest dropped (major) version if any.
+func filterMajor(currentTag string, newer []string, allowMajor bool) (kept []string, majorAvail string) {
+	if allowMajor {
+		return newer, ""
+	}
+	cm, ok := majorOf(currentTag)
+	if !ok {
+		return newer, "" // can't determine major → don't filter
+	}
+	for _, v := range newer {
+		if m, ok := majorOf(v); ok && m != cm {
+			majorAvail = v // newer is ascending, so this ends up the highest major
+			continue
+		}
+		kept = append(kept, v)
+	}
+	return kept, majorAvail
+}
+
+// majorOf returns the leading integer (major version) of a tag like "15" or "v1.2.3".
+func majorOf(tag string) (int, bool) {
+	t := strings.TrimPrefix(tag, "v")
+	i := 0
+	for i < len(t) && t[i] >= '0' && t[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, false
+	}
+	n, _ := strconv.Atoi(t[:i])
+	return n, true
+}
+
 func (s *Server) pendingUpdates(ctx context.Context) []pendingUpd {
 	var out []pendingUpd
+	allowMajor := s.set.Get().AllowMajor
 	add := func(local bool, host, projName, file string, pid int, svcName, image string) {
 		if image == "" || !strings.Contains(image, ":") || s.set.Pinned(file, svcName) {
 			return
@@ -537,6 +580,10 @@ func (s *Server) pendingUpdates(ctx context.Context) []pendingUpd {
 		ref := registry.ParseRef(image)
 		newer, comparable, err := s.reg.Newer(ctx, ref)
 		if err != nil || !comparable || len(newer) == 0 {
+			return
+		}
+		newer, _ = filterMajor(ref.Tag, newer, allowMajor) // don't auto-include major bumps
+		if len(newer) == 0 {
 			return
 		}
 		latest := newer[len(newer)-1]
@@ -648,6 +695,10 @@ func (s *Server) handleReviewCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	ref := registry.ParseRef(image)
 	newer, comparable, err := s.reg.Newer(r.Context(), ref)
+	var majorAvail string
+	if err == nil && comparable {
+		newer, majorAvail = filterMajor(ref.Tag, newer, s.set.Get().AllowMajor)
+	}
 	view := map[string]any{"Service": service, "From": ref.Tag}
 	switch {
 	case err != nil:
@@ -663,6 +714,8 @@ func (s *Server) handleReviewCheck(w http.ResponseWriter, r *http.Request) {
 			}
 			view["Steps"] = steps
 		}
+	case majorAvail != "":
+		view["MajorOnly"] = majorAvail // a major bump exists but is excluded from update-all
 	}
 	s.render(w, "reviewstatus", view)
 }
@@ -672,15 +725,30 @@ func (s *Server) handleReviewCheck(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateAll(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		ctx := context.Background()
-		for _, u := range s.pendingUpdates(ctx) {
-			if u.Local {
-				if p, ok := s.project(strconv.Itoa(u.PID)); ok {
-					s.applyUpdate(ctx, p, u.Service, u.To)
-				}
-			} else {
-				s.enqueue(u.Host, u.File, u.Service, u.To)
-			}
+		conc := s.set.Get().Concurrency
+		if conc < 1 {
+			conc = 1
 		}
+		sem := make(chan struct{}, conc)
+		var wg sync.WaitGroup
+		for _, u := range s.pendingUpdates(ctx) {
+			if !u.Local {
+				s.enqueue(u.Host, u.File, u.Service, u.To) // remote: agent runs it sequentially
+				continue
+			}
+			p, ok := s.project(strconv.Itoa(u.PID))
+			if !ok {
+				continue
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(p Project, svc, to string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				s.applyUpdate(ctx, p, svc, to)
+			}(p, u.Service, u.To)
+		}
+		wg.Wait()
 	}()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -717,11 +785,14 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 		Outcome: string(res.Outcome), Err: errStr, Logs: strings.TrimSpace(res.Logs),
 		Duration: res.Duration.Round(time.Millisecond).String(),
 	})
-	if res.Outcome == engine.OutcomeRolledBack || res.Outcome == engine.OutcomeError {
+	switch res.Outcome {
+	case engine.OutcomeRolledBack, engine.OutcomeError:
 		s.notify.Failure(notify.Event{
 			Project: p.Name, Service: service, From: current, To: target,
 			Outcome: string(res.Outcome), Error: errStr, Logs: strings.TrimSpace(res.Logs),
 		})
+	case engine.OutcomeUpdated:
+		s.notify.Success(p.Name, service, current, target)
 	}
 	return res, current
 }
