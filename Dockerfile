@@ -1,11 +1,15 @@
 # ---- build ----
-FROM golang:1.26-alpine AS build
+# Pinned to BUILDPLATFORM so the compiler always runs natively: Go cross-compiles
+# to TARGETARCH itself, which is far faster than emulating the target under QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -trimpath \
     -ldflags "-s -w -X github.com/El-Mundos/belay/internal/version.Version=${VERSION}" \
     -o /belay ./cmd/belay
 
