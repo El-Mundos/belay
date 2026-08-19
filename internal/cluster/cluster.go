@@ -24,13 +24,23 @@ type Registration struct {
 	Projects []Project `json:"projects"`
 }
 
+// RegistryAuth is a single scoped credential for pulling a command's target image from a private
+// registry. The server attaches only the credential matching the image's registry (when one is
+// configured); a nil Auth means anonymous — or whatever login the agent host already holds.
+type RegistryAuth struct {
+	Host     string `json:"host"`
+	Username string `json:"username"`
+	Token    string `json:"token"`
+}
+
 // Command is a unit of work the server hands an agent. Kind is currently always "update".
 type Command struct {
-	ID      string `json:"id"`
-	Kind    string `json:"kind"`
-	Project string `json:"project"` // compose file path on the agent host
-	Service string `json:"service"`
-	Image   string `json:"image"` // target image ref
+	ID      string        `json:"id"`
+	Kind    string        `json:"kind"`
+	Project string        `json:"project"` // compose file path on the agent host
+	Service string        `json:"service"`
+	Image   string        `json:"image"`          // target image ref
+	Auth    *RegistryAuth `json:"auth,omitempty"` // scoped pull credential for Image's registry, if private
 }
 
 // Result is what the agent posts back after running a command.

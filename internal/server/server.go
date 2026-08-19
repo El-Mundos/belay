@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +65,8 @@ type Server struct {
 	jobs    *jobManager            // live activity panel (SSE)
 	su      *selfupdate.Manager    // belay self-update (nil-safe if not in a container)
 	suAvail bool                   // cached: a newer belay image is available
+
+	dockerCfgDir string // DOCKER_CONFIG dir holding generated auths for private-registry pulls
 
 	agentsMu sync.Mutex
 	agents   map[string]*agentConn // connected remote agents, by host
@@ -119,7 +122,7 @@ func New(cfg Config) *Server {
 	if cfg.Snapshot {
 		eng.Snapshot = agent.Snapshotter{} // snapshot volumes -> restore data on rollback
 	}
-	return &Server{
+	s := &Server{
 		cfg:   cfg,
 		reg:   registry.New(),
 		eng:   eng,
@@ -147,6 +150,29 @@ func New(cfg Config) *Server {
 		jobs:   newJobManager(),
 		su:     selfupdate.Detect(context.Background()),
 		agents: map[string]*agentConn{},
+	}
+	// private registries: the version-check client reads creds live; the pull reads a generated
+	// docker config.json (DOCKER_CONFIG) so `docker compose up --pull` can authenticate too.
+	s.reg.SetCreds(func(host string) (string, string, bool) { return s.set.Get().RegistryCred(host) })
+	if cfg.DataDir != "" {
+		s.dockerCfgDir = filepath.Join(cfg.DataDir, "docker")
+		os.Setenv("DOCKER_CONFIG", s.dockerCfgDir)
+	}
+	s.syncDockerAuth()
+	return s
+}
+
+// syncDockerAuth (re)writes the docker config.json used by pulls from the current registry settings.
+func (s *Server) syncDockerAuth() {
+	if s.dockerCfgDir == "" {
+		return
+	}
+	var auths []registry.Auth
+	for _, r := range s.set.Get().Registries {
+		auths = append(auths, registry.Auth{Host: r.Host, Username: r.Username, Token: r.Token})
+	}
+	if err := registry.WriteDockerConfig(s.dockerCfgDir, auths); err != nil {
+		log.Printf("registry: write docker config: %v", err)
 	}
 }
 

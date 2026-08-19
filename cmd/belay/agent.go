@@ -20,6 +20,7 @@ import (
 	"github.com/El-Mundos/belay/internal/discover"
 	"github.com/El-Mundos/belay/internal/engine"
 	"github.com/El-Mundos/belay/internal/health"
+	"github.com/El-Mundos/belay/internal/registry"
 )
 
 // runAgent runs a headless Belay agent: it dials OUT to a server, reports its local compose stacks,
@@ -127,6 +128,14 @@ func runCommand(eng *engine.Engine, cmd cluster.Command, host string) cluster.Re
 		return res
 	}
 	res.From = current
+	// a server-pushed scoped credential lets the pull authenticate to a private registry; merge it
+	// into the host's docker config so it composes with any manual `docker login` already present.
+	if cmd.Auth != nil {
+		a := registry.Auth{Host: cmd.Auth.Host, Username: cmd.Auth.Username, Token: cmd.Auth.Token}
+		if err := registry.MergeDockerConfig(dockerConfigDir(), a); err != nil {
+			log.Printf("command %s: registry auth: %v", cmd.ID, err)
+		}
+	}
 	r := engine.Request{Project: cmd.Project, Service: cmd.Service, FromImage: current, ToImage: cmd.Image}
 	out := eng.SafeUpdate(context.Background(), r)
 	// the agent has no rollback-retention UI, so discard the success snapshot immediately
@@ -144,6 +153,16 @@ func runCommand(eng *engine.Engine, cmd cluster.Command, host string) cluster.Re
 }
 
 func projName(file string) string { return filepath.Base(filepath.Dir(file)) }
+
+// dockerConfigDir is where `docker` reads/writes config.json — DOCKER_CONFIG if the operator set one,
+// else the default ~/.docker. Merging the pushed credential here keeps the host's own logins intact.
+func dockerConfigDir() string {
+	if d := os.Getenv("DOCKER_CONFIG"); d != "" {
+		return d
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".docker")
+}
 
 // ---- HTTP client for the dial-out protocol ----
 

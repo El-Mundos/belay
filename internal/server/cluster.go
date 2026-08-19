@@ -166,6 +166,7 @@ func (s *Server) handleRemoteUpdate(w http.ResponseWriter, r *http.Request) {
 	cmd := cluster.Command{
 		ID: newToken()[:12], Kind: "update",
 		Project: r.FormValue("file"), Service: r.FormValue("s"), Image: target,
+		Auth: s.authForImage(target),
 	}
 	select {
 	case c.queue <- cmd:
@@ -183,7 +184,7 @@ func (s *Server) enqueue(host, file, service, image string) bool {
 	if c == nil {
 		return false
 	}
-	cmd := cluster.Command{ID: newToken()[:12], Kind: "update", Project: file, Service: service, Image: image}
+	cmd := cluster.Command{ID: newToken()[:12], Kind: "update", Project: file, Service: service, Image: image, Auth: s.authForImage(image)}
 	select {
 	case c.queue <- cmd:
 		s.jobs.startRemote(host, filepath.Base(filepath.Dir(file)), service, image, cmd.ID) // show in Activity tray
@@ -191,6 +192,16 @@ func (s *Server) enqueue(host, file, service, image string) bool {
 	default:
 		return false
 	}
+}
+
+// authForImage returns the scoped pull credential for an image's registry, or nil if none is
+// configured — the agent then pulls anonymously or with whatever login its host already holds.
+func (s *Server) authForImage(image string) *cluster.RegistryAuth {
+	host := registry.ParseRef(image).Registry
+	if user, token, ok := s.set.Get().RegistryCred(host); ok {
+		return &cluster.RegistryAuth{Host: host, Username: user, Token: token}
+	}
+	return nil
 }
 
 // agentCount is the number of currently-online agents (for the nav badge).

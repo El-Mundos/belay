@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,6 +21,14 @@ type Notify struct {
 	OnFailure    bool   `json:"on_failure"`     // notify when an update fails / rolls back
 	OnNewVersion bool   `json:"on_new_version"` // notify when auto-check finds a newer version
 	OnSuccess    bool   `json:"on_success"`     // notify when an update succeeds
+}
+
+// Registry holds credentials for a private container registry, used both for the version-check API
+// calls and (via a generated docker config.json) for the actual pull. Token is a password or PAT.
+type Registry struct {
+	Host     string `json:"host"`     // docker.io | ghcr.io | registry.example.com:5000
+	Username string `json:"username"`
+	Token    string `json:"token"`
 }
 
 // Probe is an optional health check for a service, forming the middle rung of the health ladder
@@ -41,8 +50,36 @@ type Settings struct {
 	Concurrency         int              `json:"concurrency"`           // parallel updates in update-all (min 1)
 	MetricsToken        string           `json:"metrics_token"`         // if set, /metrics requires ?token= or Bearer
 	Notify              Notify           `json:"notify"`
-	Pins                map[string]bool  `json:"pins"`   // key = project\x00service → ignored for updates
-	Probes              map[string]Probe `json:"probes"` // key = project\x00service
+	Registries          []Registry       `json:"registries"` // private-registry credentials for checks + pulls
+	Pins                map[string]bool  `json:"pins"`       // key = project\x00service → ignored for updates
+	Probes              map[string]Probe `json:"probes"`     // key = project\x00service
+}
+
+// canonicalRegistry normalizes a registry host for matching, collapsing Docker Hub's several spellings
+// to a single "docker.io" token.
+func canonicalRegistry(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	h = strings.TrimPrefix(h, "https://")
+	h = strings.TrimPrefix(h, "http://")
+	h = strings.TrimSuffix(h, "/v1")
+	h = strings.TrimSuffix(h, "/")
+	switch h {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return "docker.io"
+	}
+	return h
+}
+
+// RegistryCred returns the configured credentials for a registry host (matching Docker Hub's aliases),
+// used by the registry client's auth dance. ok is false when nothing matches or the entry is blank.
+func (s Settings) RegistryCred(host string) (user, token string, ok bool) {
+	want := canonicalRegistry(host)
+	for _, r := range s.Registries {
+		if r.Username != "" && canonicalRegistry(r.Host) == want {
+			return r.Username, r.Token, true
+		}
+	}
+	return "", "", false
 }
 
 // InQuietHours reports whether the given hour (0-23) is inside the notification quiet window.

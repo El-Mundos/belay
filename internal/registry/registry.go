@@ -7,6 +7,7 @@ package registry
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,35 +53,66 @@ func ParseRef(image string) Ref {
 type Client struct {
 	HTTP   *http.Client
 	Scheme string
+	// creds returns credentials for a registry host (empty ok => anonymous). Set via SetCreds so it
+	// reads live settings; a nil creds means every request is anonymous (the default).
+	creds func(host string) (user, pass string, ok bool)
 }
 
 func New() *Client {
 	return &Client{HTTP: &http.Client{Timeout: 15 * time.Second}, Scheme: "https"}
 }
 
+// SetCreds wires a live credentials source (typically settings) for private registries.
+func (c *Client) SetCreds(fn func(host string) (user, pass string, ok bool)) { c.creds = fn }
+
+func (c *Client) cred(host string) (string, string, bool) {
+	if c.creds == nil {
+		return "", "", false
+	}
+	return c.creds(host)
+}
+
+// authFor turns a 401's WWW-Authenticate challenge into the Authorization header value to retry with.
+// It handles the Bearer token dance (Docker Hub, ghcr, quay, Harbor) and plain Basic auth (a
+// registry:2 behind htpasswd), pulling credentials from SetCreds when the registry needs them.
+func (c *Client) authFor(ctx context.Context, ref Ref, wwwAuth string) (string, error) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(wwwAuth)), "basic") {
+		user, pass, ok := c.cred(ref.Registry)
+		if !ok {
+			return "", fmt.Errorf("registry %s requires credentials", ref.Registry)
+		}
+		return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass)), nil
+	}
+	tok, err := c.token(ctx, ref, parseChallenge(wwwAuth))
+	if err != nil {
+		return "", err
+	}
+	return "Bearer " + tok, nil
+}
+
 // Tags returns all tags of the repository (following pagination + anonymous token auth).
 func (c *Client) Tags(ctx context.Context, ref Ref) ([]string, error) {
 	next := fmt.Sprintf("%s://%s/v2/%s/tags/list?n=200", c.Scheme, ref.Registry, ref.Repository)
 	var (
-		token string
-		all   []string
+		auth string
+		all  []string
 	)
 	for next != "" {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, next, nil)
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
 		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			return nil, err
 		}
-		if resp.StatusCode == http.StatusUnauthorized && token == "" {
-			ch := parseChallenge(resp.Header.Get("WWW-Authenticate"))
+		if resp.StatusCode == http.StatusUnauthorized && auth == "" {
+			ww := resp.Header.Get("WWW-Authenticate")
 			resp.Body.Close()
-			if token, err = c.token(ctx, ch); err != nil {
+			if auth, err = c.authFor(ctx, ref, ww); err != nil {
 				return nil, err
 			}
-			continue // retry same URL with the token
+			continue // retry same URL with the credentials
 		}
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -134,7 +166,7 @@ func (c *Client) Newer(ctx context.Context, ref Ref) (newer []string, comparable
 	return newer, true, nil
 }
 
-func (c *Client) token(ctx context.Context, ch map[string]string) (string, error) {
+func (c *Client) token(ctx context.Context, ref Ref, ch map[string]string) (string, error) {
 	realm := ch["realm"]
 	if realm == "" {
 		return "", fmt.Errorf("registry auth challenge had no realm")
@@ -152,6 +184,9 @@ func (c *Client) token(ctx context.Context, ch map[string]string) (string, error
 	}
 	u.RawQuery = q.Encode()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if user, pass, ok := c.cred(ref.Registry); ok { // authenticated token for a private repo
+		req.SetBasicAuth(user, pass)
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return "", err
@@ -244,25 +279,26 @@ func (c *Client) SourceRepo(ctx context.Context, ref Ref) (string, error) {
 	return cfg.Config.Labels["org.opencontainers.image.source"], nil
 }
 
-// registryGet does an authenticated GET against /v2/<repo><path>, handling the bearer-token dance.
-func (c *Client) registryGet(ctx context.Context, ref Ref, path, accept string, token *string) ([]byte, string, error) {
+// registryGet does an authenticated GET against /v2/<repo><path>, handling the auth dance. auth holds
+// the full Authorization header value across the caller's calls so the challenge is answered once.
+func (c *Client) registryGet(ctx context.Context, ref Ref, path, accept string, auth *string) ([]byte, string, error) {
 	url := fmt.Sprintf("%s://%s/v2/%s%s", c.Scheme, ref.Registry, ref.Repository, path)
 	for {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if accept != "" {
 			req.Header.Set("Accept", accept)
 		}
-		if *token != "" {
-			req.Header.Set("Authorization", "Bearer "+*token)
+		if *auth != "" {
+			req.Header.Set("Authorization", *auth)
 		}
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			return nil, "", err
 		}
-		if resp.StatusCode == http.StatusUnauthorized && *token == "" {
-			ch := parseChallenge(resp.Header.Get("WWW-Authenticate"))
+		if resp.StatusCode == http.StatusUnauthorized && *auth == "" {
+			ww := resp.Header.Get("WWW-Authenticate")
 			resp.Body.Close()
-			if *token, err = c.token(ctx, ch); err != nil {
+			if *auth, err = c.authFor(ctx, ref, ww); err != nil {
 				return nil, "", err
 			}
 			continue

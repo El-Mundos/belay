@@ -14,6 +14,14 @@ import (
 	"github.com/El-Mundos/belay/internal/registry"
 )
 
+// regRow is one private-registry credential row on the settings page.
+type regRow struct {
+	Idx      int
+	Host     string
+	Username string
+	Token    string
+}
+
 // probeRow is one service on the settings page (pin state + optional health probe).
 type probeRow struct {
 	Idx     int
@@ -46,10 +54,21 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			i++
 		}
 	}
+	// registry rows: existing creds + two blank rows so new ones can be added without JS.
+	var regs []regRow
+	for j, rg := range cur.Registries {
+		regs = append(regs, regRow{Idx: j, Host: rg.Host, Username: rg.Username, Token: rg.Token})
+	}
+	for b := 0; b < 2; b++ {
+		regs = append(regs, regRow{Idx: len(regs)})
+	}
+
 	data := s.base(r, "settings")
 	data["S"] = cur
 	data["Services"] = rows
 	data["N"] = i
+	data["Registries"] = regs
+	data["RN"] = len(regs)
 	s.render(w, "settings", data)
 }
 
@@ -94,7 +113,19 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 			st.QuietEnd = atoiDefault(r.FormValue("quiet_end"), 0)
 			st.Concurrency = atoiDefault(r.FormValue("concurrency"), 1)
 			st.MetricsToken = strings.TrimSpace(r.FormValue("metrics_token"))
+			rn, _ := strconv.Atoi(r.FormValue("rn"))
+			st.Registries = st.Registries[:0]
+			for i := 0; i < rn; i++ {
+				host := strings.TrimSpace(r.FormValue(fmt.Sprintf("reg_host_%d", i)))
+				user := strings.TrimSpace(r.FormValue(fmt.Sprintf("reg_user_%d", i)))
+				token := strings.TrimSpace(r.FormValue(fmt.Sprintf("reg_token_%d", i)))
+				if host == "" || user == "" {
+					continue // a blank row = removed
+				}
+				st.Registries = append(st.Registries, config.Registry{Host: host, Username: user, Token: token})
+			}
 		})
+		s.syncDockerAuth() // rewrite docker config.json for pulls
 	}
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }
