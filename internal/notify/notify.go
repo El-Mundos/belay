@@ -56,7 +56,7 @@ func (n *Notifier) Failure(e Event) {
 	if e.Error != "" {
 		msg += "\n" + e.Error
 	}
-	go n.post(c, title, msg, "warning")
+	go n.post(c, e.Service, title, msg, "warning")
 }
 
 // Success fires a notification about a successful update (respects quiet hours).
@@ -70,7 +70,7 @@ func (n *Notifier) Success(project, service, from, to string) {
 	}
 	title := fmt.Sprintf("Belay: %s updated", service)
 	msg := fmt.Sprintf("%s: %s → %s (on %s)", service, from, to, project)
-	go n.post(c, title, msg, "white_check_mark")
+	go n.post(c, service, title, msg, "white_check_mark")
 }
 
 // NewVersion fires a notification that a newer version is available (respects quiet hours).
@@ -84,7 +84,7 @@ func (n *Notifier) NewVersion(project, service, from, to string) {
 	}
 	title := fmt.Sprintf("Belay: update available for %s", service)
 	msg := fmt.Sprintf("%s: %s → %s (on %s)", service, from, to, project)
-	go n.post(c, title, msg, "arrow_up")
+	go n.post(c, service, title, msg, "arrow_up")
 }
 
 // Test sends a one-off notification so the user can verify their settings from the config page.
@@ -93,17 +93,17 @@ func (n *Notifier) Test(c config.Notify) error {
 	if c.URL == "" {
 		return fmt.Errorf("no webhook URL configured")
 	}
-	return n.deliver(c, "Belay: test notification", "If you can read this, notifications are wired up. ⚓", "white_check_mark")
+	return n.deliver(c, "", "Belay: test notification", "If you can read this, notifications are wired up. ⚓", "white_check_mark")
 }
 
-func (n *Notifier) post(c config.Notify, title, msg, tag string) {
-	if err := n.deliver(c, title, msg, tag); err != nil {
+func (n *Notifier) post(c config.Notify, svc, title, msg, tag string) {
+	if err := n.deliver(c, svc, title, msg, tag); err != nil {
 		log.Printf("notify: %v", err)
 	}
 }
 
-func (n *Notifier) deliver(c config.Notify, title, msg, tag string) error {
-	ctype, body, headers := build(c, title, msg, tag)
+func (n *Notifier) deliver(c config.Notify, svc, title, msg, tag string) error {
+	ctype, body, headers := build(c, svc, title, msg, tag)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, c.URL, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -124,7 +124,7 @@ func (n *Notifier) deliver(c config.Notify, title, msg, tag string) error {
 }
 
 // build renders the request body + headers for the configured provider.
-func build(c config.Notify, title, msg, tag string) (ctype string, body []byte, headers map[string]string) {
+func build(c config.Notify, svc, title, msg, tag string) (ctype string, body []byte, headers map[string]string) {
 	kind := c.Kind
 	if kind == "" || kind == "auto" {
 		switch {
@@ -150,8 +150,12 @@ func build(c config.Notify, title, msg, tag string) (ctype string, body []byte, 
 		b, _ := json.Marshal(map[string]string{"title": title, "message": msg})
 		return "application/json", b, nil
 	case "alertmanager": // POST the URL should be <alertmanager>/api/v2/alerts — shows up in Karma
+		name := "Belay"
+		if svc != "" {
+			name = "(Belay) " + svc // per-service alertname so they don't collapse into one group in Karma
+		}
 		b, _ := json.Marshal([]map[string]any{{
-			"labels":      map[string]string{"alertname": "Belay", "severity": "warning", "source": "belay"},
+			"labels":      map[string]string{"alertname": name, "severity": "warning", "source": "belay"},
 			"annotations": map[string]string{"summary": title, "description": msg},
 		}})
 		return "application/json", b, nil
