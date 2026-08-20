@@ -110,7 +110,7 @@ func runServer(args []string) {
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
 		ForwardGroupsHeader: *forwardGroups,
-		NotifyWebhook: *notifyURL, Snapshot: *snapshot, Timeout: *timeout, MinUptime: *minUptime,
+		NotifyWebhook:       *notifyURL, Snapshot: *snapshot, Timeout: *timeout, MinUptime: *minUptime,
 		RollbackWindow: *rollbackWindow, DataDir: *dataDir, AgentToken: *agentToken,
 	})
 	if err := srv.Run(); err != nil {
@@ -121,6 +121,7 @@ func runServer(args []string) {
 func runSelfUpdate(args []string) {
 	fs := flag.NewFlagSet("self-update", flag.ExitOnError)
 	check := fs.Bool("check", false, "only report whether a newer image is available")
+	dataDir := fs.String("data-dir", os.Getenv("BELAY_DATA_DIR"), "directory for the self-update journal (env BELAY_DATA_DIR)")
 	fs.Parse(args)
 	m := selfupdate.Detect(context.Background())
 	if m == nil || !m.Enabled() {
@@ -139,7 +140,7 @@ func runSelfUpdate(args []string) {
 		return
 	}
 	fmt.Printf("recreating belay from %s …\n", m.Image())
-	if err := m.Apply(context.Background()); err != nil {
+	if err := m.Apply(context.Background(), *dataDir); err != nil {
 		fatal(err)
 	}
 	fmt.Println("helper launched; belay will be replaced momentarily.")

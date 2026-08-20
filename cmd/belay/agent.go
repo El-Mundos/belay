@@ -21,6 +21,7 @@ import (
 	"github.com/El-Mundos/belay/internal/engine"
 	"github.com/El-Mundos/belay/internal/health"
 	"github.com/El-Mundos/belay/internal/registry"
+	"github.com/El-Mundos/belay/internal/selfupdate"
 	"github.com/El-Mundos/belay/internal/version"
 )
 
@@ -36,6 +37,7 @@ func runAgent(args []string) {
 	timeout := fs.Duration("timeout", 90*time.Second, "health-gate timeout")
 	minUptime := fs.Duration("min-uptime", 10*time.Second, "stayed-running window when the image has no healthcheck")
 	snapshot := fs.Bool("snapshot", true, "snapshot volumes before updating and restore data on rollback")
+	dataDir := fs.String("data-dir", os.Getenv("BELAY_DATA_DIR"), "directory for the self-update journal (env BELAY_DATA_DIR)")
 	fs.Parse(args)
 
 	if *server == "" || *token == "" {
@@ -52,11 +54,27 @@ func runAgent(args []string) {
 	ac := &agentClient{base: strings.TrimRight(*server, "/"), token: *token, host: host,
 		hc: &http.Client{Timeout: 15 * time.Second}, poller: &http.Client{Timeout: 35 * time.Second}}
 
-	log.Printf("belay agent %q → %s", host, ac.base)
+	log.Printf("belay agent %q (%s) → %s", host, version.Version, ac.base)
+
+	// An agent can self-update too, and it can be interrupted mid-swap exactly like a server. It
+	// has no UI to report that in, so the journal's verdict goes to the log — and the version the
+	// agent reports on registration is what shows up on the server's Hosts tab either way.
+	su := selfupdate.Detect(context.Background())
+	if *dataDir != "" {
+		if out := su.Reconcile(context.Background(), *dataDir); out.Kind != "" {
+			log.Printf("self-update: %s — %s", out.Kind, out.Detail)
+			if out.ReapAfter != "" {
+				go func(c string) {
+					time.Sleep(selfupdate.GateWindow)
+					su.Reap(context.Background(), *dataDir, c)
+				}(out.ReapAfter)
+			}
+		}
+	}
 
 	// register once up front (retrying) so the first poll won't 404, then heartbeat every 60s
 	for {
-		if err := ac.register(collectProjects(projects)); err == nil {
+		if err := ac.register(collectProjects(projects, su)); err == nil {
 			break
 		} else {
 			log.Printf("register: %v (retrying in 5s)", err)
@@ -66,7 +84,7 @@ func runAgent(args []string) {
 	go func() {
 		for {
 			time.Sleep(60 * time.Second)
-			if err := ac.register(collectProjects(projects)); err != nil {
+			if err := ac.register(collectProjects(projects, su)); err != nil {
 				log.Printf("register: %v", err)
 			}
 		}
@@ -83,6 +101,23 @@ func runAgent(args []string) {
 		if !ok {
 			continue // 204 timeout, just poll again
 		}
+		if cmd.Kind == cluster.KindSelf {
+			// Report BEFORE applying: the helper is about to remove this very container, so a
+			// result posted afterwards would never be sent.
+			res := cluster.Result{CommandID: cmd.ID, Host: host, Project: "belay-agent", Service: "agent",
+				From: version.Version, To: cmd.Image, Outcome: "updated", Duration: "-"}
+			if err := su.Apply(context.Background(), *dataDir); err != nil {
+				res.Outcome, res.Err = "error", err.Error()
+				log.Printf("self-update: %v", err)
+			} else {
+				res.Logs = "self-update helper launched; the agent will disappear and re-register on the new image"
+				log.Printf("self-update: helper launched, going down")
+			}
+			if err := ac.postResult(res); err != nil {
+				log.Printf("post result: %v", err)
+			}
+			continue
+		}
 		log.Printf("command %s: update %s in %s → %s", cmd.ID, cmd.Service, cmd.Project, cmd.Image)
 		res := runCommand(eng, cmd, host)
 		if err := ac.postResult(res); err != nil {
@@ -92,7 +127,8 @@ func runAgent(args []string) {
 }
 
 // collectProjects returns the stacks to report: the explicit --project list, else auto-discovery.
-func collectProjects(explicit stringList) []cluster.Project {
+// su (may be nil outside a container) marks the services this agent must never update itself.
+func collectProjects(explicit stringList, su *selfupdate.Manager) []cluster.Project {
 	var files []string
 	if len(explicit) > 0 {
 		for _, p := range explicit {
@@ -113,7 +149,9 @@ func collectProjects(explicit stringList) []cluster.Project {
 		}
 		p := cluster.Project{Name: projName(f), File: f}
 		for _, sv := range services {
-			p.Services = append(p.Services, cluster.Service{Name: sv.Name, Image: sv.Image})
+			p.Services = append(p.Services, cluster.Service{
+				Name: sv.Name, Image: sv.Image, Protected: su.Protects(sv.Name, sv.Image),
+			})
 		}
 		out = append(out, p)
 	}

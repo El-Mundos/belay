@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -27,6 +28,7 @@ import (
 	"github.com/El-Mundos/belay/internal/registry"
 	"github.com/El-Mundos/belay/internal/selfupdate"
 	"github.com/El-Mundos/belay/internal/store"
+	"github.com/El-Mundos/belay/internal/version"
 	"github.com/El-Mundos/belay/web"
 	"path/filepath"
 )
@@ -38,20 +40,20 @@ type Project struct {
 }
 
 type Config struct {
-	Addr           string
-	Projects       []Project
-	Password       string
-	ForwardHeader  string
+	Addr          string
+	Projects      []Project
+	Password      string
+	ForwardHeader string
 	// ForwardGroupsHeader carries the caller's groups from the reverse proxy, for the optional
 	// Settings group gate (Authentik sends X-authentik-groups, pipe-separated).
 	ForwardGroupsHeader string
-	NotifyWebhook  string
-	Snapshot       bool
-	Timeout        time.Duration
-	MinUptime      time.Duration
-	RollbackWindow time.Duration // seed for a fresh install; the settings page owns it thereafter
-	DataDir        string        // where settings.json + store.json live ("" = in-memory only)
-	AgentToken     string        // shared bearer token for remote agents ("" = multi-host disabled)
+	NotifyWebhook       string
+	Snapshot            bool
+	Timeout             time.Duration
+	MinUptime           time.Duration
+	RollbackWindow      time.Duration // seed for a fresh install; the settings page owns it thereafter
+	DataDir             string        // where settings.json + store.json live ("" = in-memory only)
+	AgentToken          string        // shared bearer token for remote agents ("" = multi-host disabled)
 }
 
 type Server struct {
@@ -108,7 +110,21 @@ func New(cfg Config) *Server {
 		})
 	}
 
-	funcs := template.FuncMap{"sub": func(a, b int) int { return a - b }}
+	funcs := template.FuncMap{
+		"sub": func(a, b int) int { return a - b },
+		// the services a host refuses to update through the ordinary path (Belay/agent + transport)
+		"protected": func(h hostView) []string {
+			var out []string
+			for _, p := range h.Projects {
+				for _, sv := range p.Services {
+					if sv.Protected != "" {
+						out = append(out, sv.Name)
+					}
+				}
+			}
+			return out
+		},
+	}
 	page := func(files ...string) *template.Template {
 		return template.Must(template.New("").Funcs(funcs).ParseFS(web.FS, files...))
 	}
@@ -189,6 +205,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /{$}", s.guard(s.handleDashboard))
 	mux.HandleFunc("GET /failed", s.guard(s.handleFailed))
 	mux.HandleFunc("GET /history", s.guard(s.handleHistory))
+	mux.HandleFunc("GET /record", s.guard(s.handleRecord))
 	mux.HandleFunc("GET /check", s.guard(s.handleCheck))
 	mux.HandleFunc("GET /review", s.guard(s.handleReview))
 	mux.HandleFunc("GET /review/check", s.guard(s.handleReviewCheck))
@@ -204,14 +221,22 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /self-update", s.guard(s.handleSelfUpdate))
 	mux.HandleFunc("GET /hosts", s.guard(s.handleHosts))
 	mux.HandleFunc("POST /remote-update", s.guard(s.handleRemoteUpdate))
+	mux.HandleFunc("POST /agent-update", s.guard(s.handleAgentSelfUpdate))
+	// Unguarded liveness probe: it exposes nothing, and a health check that needs a session is
+	// useless to Docker, to a reverse proxy, and to Belay's own health gate.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprintln(w, "ok "+version.Version)
+	})
 	// remote-agent endpoints (token-authed, not session-guarded)
 	mux.HandleFunc("POST /agent/register", s.handleAgentRegister)
 	mux.HandleFunc("GET /agent/poll", s.handleAgentPoll)
 	mux.HandleFunc("POST /agent/result", s.handleAgentResult)
 
-	go s.sweepRollbacks()  // discard snapshots whose retention window has passed
-	go s.autoCheckLoop()   // periodic version checks (cache + notify), per settings
-	go s.selfUpdateWatch() // cache whether a newer belay image is available
+	s.reconcileSelfUpdate() // settle (and record) any self-update that was in flight when we died
+	go s.sweepRollbacks()   // discard snapshots whose retention window has passed
+	go s.autoCheckLoop()    // periodic version checks (cache + notify), per settings
+	go s.selfUpdateWatch()  // cache whether a newer belay image is available
 
 	if !s.authEnabled() {
 		log.Printf("WARNING: no auth configured (set --password or --forward-header); bind to localhost only.")
@@ -333,6 +358,7 @@ func (s *Server) base(r *http.Request, active string) map[string]any {
 	}
 	m["AgentsEnabled"] = s.agentsEnabled()
 	m["HostCount"] = s.agentCount()
+	m["Theme"] = s.set.Get().Theme // "" = follow the OS
 	return m
 }
 
@@ -419,27 +445,20 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFailed(w http.ResponseWriter, r *http.Request) {
+	rows := newRecViews(s.store.Failed())
 	data := s.base(r, "failed")
-	data["Records"] = s.store.Failed()
+	data["Records"] = rows
+	data["Rev"] = listRev(rows)
 	s.render(w, "failed", data)
-}
-
-// histRow is a successful/reverted record plus whether the manual-rollback button is live for it.
-type histRow struct {
-	store.Record
-	CanRollback bool   // newest success for this service, still within the retention window
-	Superseded  bool   // an older success whose rollback point was replaced by a newer update
-	PID         int    // project id, for the rollback POST
-	Expires     string // human "expires in …" for the button tooltip
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	recs := s.store.Succeeded()
 	now := time.Now()
 	seen := map[string]bool{} // project+service already shown a newer row
-	rows := make([]histRow, 0, len(recs))
+	rows := make([]recView, 0, len(recs))
 	for _, rec := range recs {
-		row := histRow{Record: rec}
+		row := newRecView(rec)
 		k := rec.Project + "\x00" + rec.Service
 		if pt, ok := s.store.RollbackFor(rec.Project, rec.Service); ok && now.Before(pt.ExpiresAt) {
 			if !seen[k] && pt.ToImage == rec.To {
@@ -455,7 +474,36 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	data := s.base(r, "history")
 	data["Records"] = rows
+	data["Rev"] = listRev(rows)
 	s.render(w, "history", data)
+}
+
+// handleRecord returns one stored attempt's bulky parts as JSON, for the details popout. Keeping
+// logs out of the polled lists is what lets those refresh cheaply and without churn.
+func (s *Server) handleRecord(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.URL.Query().Get("id"))
+	if err != nil {
+		http.Error(w, "bad record id", http.StatusBadRequest)
+		return
+	}
+	rec, ok := s.store.ByID(id)
+	if !ok {
+		http.Error(w, "no such record", http.StatusNotFound)
+		return
+	}
+	v := newRecView(rec)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"service": rec.Service,
+		"project": rec.Project,
+		"from":    v.FromRef,
+		"to":      v.ToRef,
+		"repo":    v.Repo,
+		"outcome": rec.Outcome,
+		"when":    rec.Time.Format("Jan 2, 15:04:05"),
+		"error":   rec.Err,
+		"logs":    rec.Logs,
+	})
 }
 
 // handleRollback reverts a previously-successful update (data + image) on user request.
@@ -530,11 +578,9 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		pid, file, image = -1, q.Get("file"), q.Get("image")
 	}
 
-	if host == "" {
-		if why := s.protectedReason(service, image); why != "" {
-			s.render(w, "status", map[string]any{"Protected": why})
-			return
-		}
+	if why := s.protectionFor(host == "", host, file, service, image); why != "" {
+		s.render(w, "status", map[string]any{"Protected": why})
+		return
 	}
 
 	ref := registry.ParseRef(image)
@@ -678,9 +724,10 @@ func (s *Server) pendingUpdates(ctx context.Context) []pendingUpd {
 		if image == "" || !strings.Contains(image, ":") || s.set.Pinned(file, svcName) {
 			return
 		}
-		// Only local services can be Belay's own container or transport; an agent host's
-		// same-named service is a different machine's problem and updates fine.
-		if local && s.protectedReason(svcName, image) != "" {
+		// Belay's own container and its Docker transport must not be recreated by the Belay doing
+		// the recreating — locally that is this process, remotely it is the agent, which reports
+		// its own protected services (a remote host's same-named service is not necessarily either).
+		if s.protectionFor(local, host, file, svcName, image) != "" {
 			return
 		}
 		up := s.checkService(ctx, image, local)
@@ -843,24 +890,43 @@ func (s *Server) handleReviewCheck(w http.ResponseWriter, r *http.Request) {
 // This was latent until digest tracking made `latest` updatable: a socket-proxy on `:latest` had
 // never been a candidate before, so the hazard had never been reachable.
 func (s *Server) protectedReason(service, image string) string {
-	if own := s.su.Container(); own != "" && service == own {
-		return "Belay itself — use the Self-update banner, which hands off to a helper container"
+	return s.su.Protects(service, image)
+}
+
+// remoteProtected returns the reason an AGENT gave for refusing to update one of its own services.
+//
+// The server cannot work this out itself: which container is the agent, and what its Docker
+// transport is, are facts about a machine the server only reaches over the wire. So the agent
+// answers for its own host and reports the verdict with its registration, and the server treats
+// that as authoritative. An agent too old to send it reports nothing, and the agent's own refusal
+// is then the only guard — which is why the Hosts tab flags version skew.
+func (s *Server) remoteProtected(host, file, service string) string {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	c := s.agents[host]
+	if c == nil {
+		return ""
 	}
-	if img := s.su.Image(); img != "" && image == img {
-		return "Belay's own image — use the Self-update banner"
-	}
-	// DOCKER_HOST looks like "tcp://belay-sockproxy:2375"; the hostname is the container name.
-	if dh := s.su.DockerHost(); dh != "" {
-		h := dh
-		if i := strings.Index(h, "://"); i >= 0 {
-			h = h[i+3:]
+	for _, p := range c.projects {
+		if p.File != file {
+			continue
 		}
-		h, _, _ = strings.Cut(h, ":")
-		if h != "" && service == h {
-			return "Belay reaches Docker through this service — recreating it would cut the connection mid-update"
+		for _, sv := range p.Services {
+			if sv.Name == service {
+				return sv.Protected
+			}
 		}
 	}
 	return ""
+}
+
+// protectionFor is the single question "may this service be updated through the ordinary path?",
+// answered for local and remote services alike.
+func (s *Server) protectionFor(local bool, host, file, service, image string) string {
+	if local {
+		return s.protectedReason(service, image)
+	}
+	return s.remoteProtected(host, file, service)
 }
 
 // svcUpdate is what a single service has waiting for it: either a newer version tag, or a rebase —
@@ -1045,7 +1111,7 @@ func (s *Server) unwindBatch(ctx context.Context, applied []pendingUpd, failedSv
 		s.store.Add(store.Record{
 			Project: u.Project, Service: u.Service, From: pt.ToImage, To: pt.FromImage,
 			Outcome: outcome, Duration: res.Duration.Round(time.Millisecond).String(),
-			Err:     note, Logs: strings.TrimSpace(res.Logs),
+			Err: note, Logs: strings.TrimSpace(res.Logs),
 		})
 	}
 }

@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
+	"time"
 )
 
 // Manager performs self-update for the belay container it is running inside.
@@ -29,9 +31,10 @@ type inspectDoc struct {
 	Name   string
 	Image  string
 	Config struct {
-		Env   []string
-		Cmd   []string
-		Image string
+		Env    []string
+		Cmd    []string
+		Image  string
+		Labels map[string]string
 	}
 	HostConfig struct {
 		RestartPolicy struct {
@@ -115,6 +118,49 @@ func (m *Manager) DockerHost() string {
 	return m.dockerHost
 }
 
+// Protects reports why a service must not be updated by the Belay this Manager belongs to, or ""
+// when it is safe. Two services in any Belay deployment cannot be recreated by the very Belay doing
+// the recreating:
+//
+//   - Belay's own container. `docker compose up -d belay` kills the process mid-update, so the
+//     update never finishes and nothing rolls it back. Apply exists precisely for this, handing off
+//     to a helper container that outlives Belay's death.
+//   - Whatever DOCKER_HOST points at. Reaching Docker to recreate the socket-proxy requires the
+//     socket-proxy, so the moment it stops, the operation loses the connection it was travelling
+//     over and can neither finish nor revert. Belay saws off the branch it is sitting on.
+//
+// This lives here, not in the server, because it is a property of a Belay PROCESS and its host —
+// which makes it equally true of an agent. An agent answers for its own host: the server cannot
+// know which container is the agent on a machine it only talks to over the wire.
+func (m *Manager) Protects(service, image string) string {
+	if m == nil {
+		return ""
+	}
+	if m.container != "" && service == m.container {
+		return "Belay itself — use self-update, which hands off to a helper container"
+	}
+	if m.image != "" && image == m.image {
+		return "Belay's own image — use self-update"
+	}
+	if h := dockerHostName(m.dockerHost); h != "" && service == h {
+		return "Belay reaches Docker through this service — recreating it would cut the connection mid-update"
+	}
+	return ""
+}
+
+// dockerHostName pulls the container name out of a DOCKER_HOST like "tcp://belay-sockproxy:2375".
+func dockerHostName(dockerHost string) string {
+	if dockerHost == "" {
+		return ""
+	}
+	h := dockerHost
+	if i := strings.Index(h, "://"); i >= 0 {
+		h = h[i+3:]
+	}
+	h, _, _ = strings.Cut(h, ":")
+	return h
+}
+
 // Available reports whether the image tag now resolves to a different image than the running one.
 // For registry images it first attempts a pull; a failed pull (e.g. a local-only tag) is ignored.
 func (m *Manager) Available(ctx context.Context) (bool, error) {
@@ -133,9 +179,17 @@ func (m *Manager) Available(ctx context.Context) (bool, error) {
 	return tagID != "" && tagID != runningID, nil
 }
 
+// helperName is the fixed name of the throwaway container that performs the swap. Fixed, not
+// random, so a second attempt replaces the first rather than racing it, and so any Belay can find
+// and reap a finished one.
+const helperName = "belay-selfupdate"
+
 // Apply recreates belay from a fresh inspection, using the current image tag. It returns once the
 // detached helper has been launched — belay itself is torn down and replaced moments later.
-func (m *Manager) Apply(ctx context.Context) error {
+//
+// dir is the data directory holding the journal (see journal.go); passing "" runs without one,
+// which still updates but leaves nobody able to report what happened if it goes wrong.
+func (m *Manager) Apply(ctx context.Context, dir string) error {
 	if !m.Enabled() {
 		return fmt.Errorf("self-update not available (not running in a detectable container)")
 	}
@@ -147,9 +201,28 @@ func (m *Manager) Apply(ctx context.Context) error {
 	if err := json.Unmarshal(raw, &docs); err != nil || len(docs) == 0 {
 		return fmt.Errorf("inspect self: %v", err)
 	}
-	script := recreateScript(docs[0])
+	// The image ID we are running now — the journal's test for "am I still the old Belay?".
+	runningID, err := dockerOut(ctx, "inspect", m.container, "--format", "{{.Image}}")
+	if err != nil {
+		return fmt.Errorf("inspect self image: %w", err)
+	}
+	backup := m.container + "-previous"
+	if err := saveState(dir, State{
+		Phase: PhaseApplying, Container: m.container, Backup: backup,
+		FromImage: runningID, ToImage: m.image, Started: time.Now(),
+	}); err != nil {
+		return fmt.Errorf("write self-update journal: %w", err)
+	}
+	script := recreateScript(docs[0], backup)
 
-	args := []string{"run", "-d", "--rm"}
+	// A leftover helper from a previous attempt would hold the name; it has already finished.
+	_ = runDocker(ctx, "rm", "-f", helperName)
+
+	// NOT --rm, and restartable: if the helper dies mid-swap (host reboot, OOM) Docker starts it
+	// again and the script — which is idempotent — finishes or rolls back. A --rm helper that died
+	// between removing the old container and starting the new one left nothing running and nothing
+	// that would ever retry.
+	args := []string{"run", "-d", "--name", helperName, "--restart", "on-failure:5"}
 	if m.network != "" {
 		args = append(args, "--network", m.network)
 	}
@@ -160,12 +233,26 @@ func (m *Manager) Apply(ctx context.Context) error {
 	}
 	// same belay image, run as a shell; sleep briefly so belay can answer the HTTP request first
 	args = append(args, "--entrypoint", "sh", m.image, "-c", "sleep 3; "+script)
-	return exec.CommandContext(ctx, "docker", args...).Run()
+	if err := exec.CommandContext(ctx, "docker", args...).Run(); err != nil {
+		clearState(dir) // nothing was launched, so nothing is in flight
+		return err
+	}
+	return nil
 }
 
-// recreateScript builds the shell that removes the old container and re-runs it from d with the
-// current image tag. Exported so it can be unit-tested without Docker.
-func recreateScript(d inspectDoc) string {
+// recreateScript builds the shell the helper runs: swap the container onto the current image tag,
+// verify it stays up, and put the old one back if it does not.
+//
+// Three properties matter more than brevity here, because nothing supervises this script:
+//
+//   - It RENAMES the old container instead of removing it. That container, stopped and intact, is
+//     the rollback. `docker rm -f` destroyed the only way back before the replacement had proven
+//     it could run.
+//   - It is IDEMPOTENT. Docker restarts the helper after a crash, so the script must be able to
+//     run again from any point: it exits immediately if the target is already up on the new image.
+//   - It GATES on the new container still running after a wait, and rolls back if not — a
+//     crash-looping new image no longer leaves the host with no Belay.
+func recreateScript(d inspectDoc, backup string) string {
 	name := strings.TrimPrefix(d.Name, "/")
 	image := d.Config.Image
 
@@ -175,6 +262,15 @@ func recreateScript(d inspectDoc) string {
 	}
 	for _, e := range d.Config.Env {
 		run = append(run, "-e", e)
+	}
+	// Labels are not decoration: they are how the container is IDENTIFIED and ROUTED. A Belay
+	// deployed by Compose carries com.docker.compose.* (drop them and the container is orphaned
+	// from its own stack — `compose up -d` no longer sees it, and would try to create a second one
+	// against the name), and behind Traefik it carries the router and forward-auth rules that put
+	// it on the internet. Recreating without them silently takes the UI offline and detaches it
+	// from the stack file, which is the opposite of what an update should do.
+	for _, k := range sortedKeys(d.Config.Labels) {
+		run = append(run, "--label", k+"="+d.Config.Labels[k])
 	}
 	for _, mnt := range d.Mounts {
 		src := mnt.Source
@@ -212,15 +308,50 @@ func recreateScript(d inspectDoc) string {
 	run = append(run, image)
 	run = append(run, d.Config.Cmd...)
 
+	qname, qbackup, qimage := shq(name), shq(backup), shq(image)
+	running := "docker inspect -f '{{.State.Running}}' " + qname + " 2>/dev/null"
+
 	var b strings.Builder
 	b.WriteString("set -e\n")
-	b.WriteString("docker pull " + shq(image) + " 2>/dev/null || true\n")
-	b.WriteString("docker rm -f " + shq(name) + " 2>/dev/null || true\n")
-	b.WriteString(shellJoin(run) + "\n")
+	// Already done? A restarted helper must not tear down a healthy new container and start over.
+	b.WriteString("target=$(docker image inspect -f '{{.Id}}' " + qimage + " 2>/dev/null || echo none)\n")
+	b.WriteString("current=$(docker inspect -f '{{.Image}}' " + qname + " 2>/dev/null || echo none)\n")
+	b.WriteString("if [ \"$target\" = \"$current\" ] && [ \"$(" + running + ")\" = \"true\" ]; then exit 0; fi\n")
+	b.WriteString("docker pull " + qimage + " 2>/dev/null || true\n")
+	// Keep the old container as the rollback target instead of destroying it.
+	b.WriteString("docker rm -f " + qbackup + " 2>/dev/null || true\n")
+	b.WriteString("docker stop " + qname + " 2>/dev/null || true\n")
+	b.WriteString("docker rename " + qname + " " + qbackup + " 2>/dev/null || true\n")
+	b.WriteString("if " + shellJoin(run) + "; then\n")
 	for _, n := range rest {
-		b.WriteString("docker network connect " + shq(n) + " " + shq(name) + " || true\n")
+		b.WriteString("  docker network connect " + shq(n) + " " + qname + " || true\n")
 	}
+	// Gate: the replacement must still be running after the window. This catches a crash-loop,
+	// which is the failure a bad image actually produces.
+	b.WriteString(fmt.Sprintf("  sleep %d\n", int(GateWindow.Seconds())))
+	b.WriteString("  if [ \"$(" + running + ")\" = \"true\" ]; then exit 0; fi\n")
+	b.WriteString("fi\n")
+	// Rollback: discard the failed replacement and put the previous container back.
+	b.WriteString("docker rm -f " + qname + " 2>/dev/null || true\n")
+	b.WriteString("docker rename " + qbackup + " " + qname + "\n")
+	b.WriteString("docker start " + qname + "\n")
 	return b.String()
+}
+
+// sortedKeys gives map iteration a stable order, so the generated script is deterministic (and
+// therefore diffable and testable) rather than reshuffling on every run.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// runDocker runs a docker command for its effect, discarding output.
+func runDocker(ctx context.Context, args ...string) error {
+	return exec.CommandContext(ctx, "docker", args...).Run()
 }
 
 func dockerOut(ctx context.Context, args ...string) (string, error) {

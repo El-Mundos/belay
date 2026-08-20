@@ -97,13 +97,129 @@
     });
   };
 
-  // The Activity tray + History/Failed lists re-render on a poll; keep each log box's open state +
-  // scroll position (keyed by data-log) so they don't spring open or yank you to the top while you're
-  // reading. Auto-follow only if you were already at the bottom (live logs).
-  var preserveIds = { "activity-body": 1, "history-list": 1, "failed-list": 1 };
+  // ---- Details popout (logs + full error) -------------------------------------------------
+  // The lists carry only what fits on a card; the bulky parts are fetched per record. That keeps
+  // every poll small, and it means a 2000-line log no longer has to live inside a list row.
+  window.belayRecord = function (id) {
+    fetch("/record?id=" + encodeURIComponent(id), { credentials: "same-origin" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(showRecord)
+      .catch(function (err) {
+        showRecord({ service: "Record " + id, error: "Could not load details: " + err.message });
+      });
+  };
+
+  function logSection(title, text, cls) {
+    const sec = document.createElement("div");
+    sec.className = "log-sec";
+    const h = document.createElement("h4");
+    h.textContent = title;
+    const pre = document.createElement("pre");
+    if (cls) pre.className = cls;
+    pre.textContent = text; // textContent, never innerHTML: log output is untrusted
+    sec.append(h, pre);
+    return sec;
+  }
+
+  function showRecord(rec) {
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML =
+      '<div class="modal modal-lg" role="dialog" aria-modal="true">' +
+      '<div class="log-head"><b data-title></b><span class="mono muted" data-sub></span>' +
+      '<button class="x" data-close aria-label="Close">✕</button></div>' +
+      '<div data-body></div>' +
+      '<div class="modal-actions"><button class="btn ghost" data-copy>Copy</button>' +
+      '<button class="btn" data-close>Close</button></div></div>';
+
+    ov.querySelector("[data-title]").textContent = rec.service || "Details";
+    const sub = [];
+    if (rec.from && rec.to) sub.push((rec.repo ? rec.repo + " " : "") + rec.from + " → " + rec.to);
+    if (rec.when) sub.push(rec.when);
+    ov.querySelector("[data-sub]").textContent = sub.join(" · ");
+
+    const body = ov.querySelector("[data-body]");
+    if (rec.error) body.appendChild(logSection("Error", rec.error, "err-text"));
+    if (rec.logs) body.appendChild(logSection("Container logs", rec.logs, "log-text"));
+    if (!rec.error && !rec.logs) {
+      const p = document.createElement("p");
+      p.className = "log-empty";
+      p.textContent = "Nothing was captured for this attempt.";
+      body.appendChild(p);
+    }
+
+    document.body.appendChild(ov);
+    const close = function () {
+      ov.remove();
+      document.removeEventListener("keydown", esc);
+    };
+    function esc(e) { if (e.key === "Escape") close(); }
+    document.addEventListener("keydown", esc);
+    ov.addEventListener("click", function (e) { if (e.target === ov) close(); });
+    ov.querySelectorAll("[data-close]").forEach(function (b) { b.onclick = close; });
+    ov.querySelector("[data-copy]").onclick = function (e) {
+      const text = [rec.error, rec.logs].filter(Boolean).join("\n\n");
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText(text).then(function () {
+        e.target.textContent = "Copied";
+        setTimeout(function () { e.target.textContent = "Copy"; }, 1200);
+      });
+    };
+    // Container logs are read from the end — land on the newest line. The error is NOT scrolled:
+    // its first line is the one that says what went wrong.
+    ov.querySelectorAll("pre.log-text").forEach(function (pre) { pre.scrollTop = pre.scrollHeight; });
+    ov.querySelector("[data-close]").focus();
+  }
+
+  // ---- Keeping background polls out of the user's way -------------------------------------
+  // Every polled list is marked data-poll. Three rules, each fixing a distinct kind of churn:
+  //   1. don't even ask while a dialog is open or text is selected inside the list;
+  //   2. don't swap when the server says nothing changed (data-rev, or an identical response);
+  //   3. when we do swap, restore the open/scroll state of any live log box.
+  function isPolled(el) { return !!(el && el.hasAttribute && el.hasAttribute("data-poll")); }
+
+  function selectionInside(el) {
+    const sel = window.getSelection && window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+    return el.contains(sel.getRangeAt(0).commonAncestorContainer);
+  }
+
+  document.addEventListener("htmx:beforeRequest", function (e) {
+    const t = e.detail.target;
+    if (!isPolled(t)) return;
+    // A refresh mid-selection wipes the selection; a refresh behind a modal is invisible anyway.
+    if (document.querySelector(".modal-overlay") || selectionInside(t)) e.preventDefault();
+  });
+
+  var lastResponse = {};
+  document.addEventListener("htmx:beforeSwap", function (e) {
+    const t = e.detail.target;
+    if (!isPolled(t)) return;
+    const resp = e.detail.serverResponse;
+    if (t.hasAttribute("data-rev")) {
+      // The list stamps a fingerprint of its rows; equal fingerprint means an identical render.
+      const doc = new DOMParser().parseFromString(resp || "", "text/html");
+      const frag = t.id ? doc.getElementById(t.id) : null;
+      if (frag && frag.getAttribute("data-rev") === t.getAttribute("data-rev")) {
+        e.detail.shouldSwap = false;
+        return;
+      }
+    } else if (lastResponse[t.id] === resp) {
+      e.detail.shouldSwap = false; // fragment targets (Activity): compare the response itself
+      return;
+    }
+    if (t.id) lastResponse[t.id] = resp;
+  });
+
+  // Keep each log box's open state + scroll position (keyed by data-log) across a swap so live
+  // logs don't spring shut or yank you to the top. Auto-follow only if you were already at the
+  // bottom.
   var logState = {};
   document.addEventListener("htmx:beforeSwap", function (e) {
-    if (!e.target || !preserveIds[e.target.id]) return;
+    if (!isPolled(e.target)) return;
     e.target.querySelectorAll("details[data-log]").forEach(function (d) {
       var pre = d.querySelector("pre");
       var atBottom = pre && (pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8);
@@ -111,7 +227,7 @@
     });
   });
   document.addEventListener("htmx:afterSwap", function (e) {
-    if (!e.target || !preserveIds[e.target.id]) return;
+    if (!isPolled(e.target)) return;
     e.target.querySelectorAll("details[data-log]").forEach(function (d) {
       var st = logState[d.getAttribute("data-log")];
       if (!st) return;

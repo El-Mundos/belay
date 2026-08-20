@@ -159,6 +159,19 @@ func (s *Store) Succeeded() []Record {
 	return out
 }
 
+// ByID returns a single attempt. The UI lists carry only what fits on a card and fetch the bulky
+// parts (logs, full error) per record on demand, which is what this backs.
+func (s *Store) ByID(id int) (Record, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.recs) - 1; i >= 0; i-- {
+		if s.recs[i].ID == id {
+			return s.recs[i], true
+		}
+	}
+	return Record{}, false
+}
+
 // Totals counts all recorded attempts by outcome (for metrics).
 func (s *Store) Totals() map[string]int {
 	s.mu.Lock()

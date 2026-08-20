@@ -4,14 +4,19 @@ import (
 	"context"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/El-Mundos/belay/internal/cluster"
 	"github.com/El-Mundos/belay/internal/compose"
 	"github.com/El-Mundos/belay/internal/config"
+	"github.com/El-Mundos/belay/internal/notify"
 	"github.com/El-Mundos/belay/internal/registry"
+	"github.com/El-Mundos/belay/internal/selfupdate"
+	"github.com/El-Mundos/belay/internal/store"
 )
 
 // regRow is one private-registry credential row on the settings page.
@@ -52,7 +57,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				Idx: i, PID: p.ID, Project: p.Name, Service: sv.Name, Image: sv.Image,
 				Pinned: cur.Pins[config.Key(p.File, sv.Name)],
 				Type:   pr.Type, Target: pr.Target, Expect: pr.Expect,
-				Group:  grp,
+				Group: grp,
 			})
 			i++
 		}
@@ -143,6 +148,9 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 			st.Concurrency = atoiDefault(r.FormValue("concurrency"), 1)
 			st.MetricsToken = strings.TrimSpace(r.FormValue("metrics_token"))
 			st.RequireGroup = strings.TrimSpace(r.FormValue("require_group"))
+			if t := r.FormValue("theme"); t == "" || t == "light" || t == "dark" {
+				st.Theme = t // anything else is not a theme we have; keep the current one
+			}
 			rn, _ := strconv.Atoi(r.FormValue("rn"))
 			st.Registries = st.Registries[:0]
 			for i := 0; i < rn; i++ {
@@ -270,6 +278,79 @@ func (s *Server) selfUpdateWatch() {
 	}
 }
 
+// reconcileSelfUpdate runs once at startup, before serving. A self-update replaces the process that
+// ordered it, so its outcome cannot be observed by the process that started it — this is where the
+// answer finally lands, in the same History every other update is recorded in.
+//
+// The interesting case is the silent one: a helper that died, or a new image that failed its gate
+// and got rolled back. Without this, that shows up only as "Belay is somehow still on the old
+// version", with nothing to explain it.
+func (s *Server) reconcileSelfUpdate() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out := s.su.Reconcile(ctx, s.cfg.DataDir)
+	if out.Kind != "" {
+		from, to := shortID(out.From), out.To
+		s.store.Add(store.Record{
+			Project: "belay", Service: "belay (self-update)", From: from, To: to,
+			Outcome: out.Kind, Err: outcomeErr(out), Duration: "-",
+		})
+		log.Printf("self-update: %s — %s", out.Kind, out.Detail)
+		if out.Kind != "updated" {
+			s.notify.Failure(notify.Event{
+				Project: "belay", Service: "belay (self-update)", From: from, To: to,
+				Outcome: out.Kind, Error: out.Detail,
+			})
+		}
+	}
+	// The predecessor container is the rollback target; it may only be discarded once the helper's
+	// gate window has passed, or we would destroy the way back while a rollback is still possible.
+	if out.ReapAfter != "" {
+		go func(c string) {
+			time.Sleep(selfupdate.GateWindow + 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			s.su.Reap(ctx, s.cfg.DataDir, c)
+		}(out.ReapAfter)
+	}
+}
+
+// outcomeErr is the explanation stored with a non-successful self-update ("" when it worked).
+func outcomeErr(o selfupdate.Outcome) string {
+	if o.Kind == "updated" {
+		return ""
+	}
+	return o.Detail
+}
+
+// shortID trims a "sha256:…" image ID to something readable in a History row.
+func shortID(id string) string {
+	if algo, hex, ok := strings.Cut(id, ":"); ok && len(hex) > 12 {
+		return algo + ":" + hex[:12]
+	}
+	return id
+}
+
+// handleAgentSelfUpdate asks an agent to replace its own container. The server cannot do this to a
+// remote host itself — only the agent can hand off to a helper on its own machine.
+func (s *Server) handleAgentSelfUpdate(w http.ResponseWriter, r *http.Request) {
+	host := r.FormValue("host")
+	s.agentsMu.Lock()
+	c := s.agents[host]
+	s.agentsMu.Unlock()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if c == nil {
+		fmt.Fprint(w, `<span class="err">host offline</span>`)
+		return
+	}
+	select {
+	case c.queue <- cluster.Command{ID: newToken()[:12], Kind: cluster.KindSelf, Image: s.su.Image()}:
+		fmt.Fprint(w, `<span class="ok">queued — the agent will drop off and re-register on the new image</span>`)
+	default:
+		fmt.Fprint(w, `<span class="err">agent queue full</span>`)
+	}
+}
+
 // handleSelfUpdate recreates the belay container from the current image tag. Belay is torn down and
 // replaced by a detached helper moments after this responds, so we render a "reconnecting" page first.
 func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
@@ -277,7 +358,7 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "self-update not available (belay is not running in a detectable container)", http.StatusBadRequest)
 		return
 	}
-	if err := s.su.Apply(r.Context()); err != nil {
+	if err := s.su.Apply(r.Context(), s.cfg.DataDir); err != nil {
 		http.Error(w, "self-update failed to launch: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

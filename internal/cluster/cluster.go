@@ -6,9 +6,15 @@
 package cluster
 
 // Service is one compose service on a host.
+//
+// Protected is the agent's own verdict that a service must not be updated through the ordinary
+// path — it is the agent's container, or the Docker transport it depends on. Only the agent can
+// know this: the server sees a service name, not which process on that host is executing the
+// update. Empty means safe (and is also what an agent too old to send it reports).
 type Service struct {
-	Name  string `json:"name"`
-	Image string `json:"image"`
+	Name      string `json:"name"`
+	Image     string `json:"image"`
+	Protected string `json:"protected,omitempty"`
 }
 
 // Project is one compose stack on a host.
@@ -40,7 +46,13 @@ type RegistryAuth struct {
 	Token    string `json:"token"`
 }
 
-// Command is a unit of work the server hands an agent. Kind is currently always "update".
+// Command kinds.
+const (
+	KindUpdate = "update"     // update one service on the agent's host
+	KindSelf   = "selfupdate" // replace the agent's own container, via the helper handoff
+)
+
+// Command is a unit of work the server hands an agent.
 type Command struct {
 	ID      string        `json:"id"`
 	Kind    string        `json:"kind"`

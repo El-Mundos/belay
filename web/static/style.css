@@ -1,10 +1,16 @@
+/* Dark is the base; light is applied either because the OS asks for it or because the Theme
+   setting does. An explicit setting must win over the OS both ways, hence the :not() — without it
+   a user who picked "dark" would still flip to light on a light-mode desktop. */
 :root {
   --bg: #0e1014; --panel: #161922; --line: #262b36; --text: #e6e8ee; --muted: #8b90a0;
   --accent: #4f8cff; --ok: #37d18a; --err: #ff6b6b; --upd: #ffcf5c;
 }
 @media (prefers-color-scheme: light) {
-  :root { --bg:#f5f6f9; --panel:#fff; --line:#e2e5ec; --text:#1a1d26; --muted:#6a7080; }
+  :root:not([data-theme="dark"]) { --bg:#f5f6f9; --panel:#fff; --line:#e2e5ec; --text:#1a1d26; --muted:#6a7080; }
 }
+:root[data-theme="light"] { --bg:#f5f6f9; --panel:#fff; --line:#e2e5ec; --text:#1a1d26; --muted:#6a7080; }
+/* log panes are dark in both themes (terminal output), so keep their text readable on light */
+:root[data-theme="light"] pre { background:#14171f; color:#cdd3e0; }
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--text);
   font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
@@ -38,7 +44,11 @@ pre { background:#0a0c10; color:#cdd3e0; padding:10px; border-radius:6px; overfl
   padding:26px; border-radius:12px; display:flex; flex-direction:column; gap:12px; }
 .login input { padding:9px 11px; border:1px solid var(--line); border-radius:6px;
   background:var(--bg); color:var(--text); font-size:14px; }
+/* Dim an element while ITS OWN request is in flight — but never a background poll. A list that
+   fades every few seconds reads as the page flashing, and it is dimming content the user is
+   actively reading. */
 .htmx-request { opacity:.6; }
+[data-poll].htmx-request { opacity:1; }
 
 /* tabs */
 .tabs { display:flex; gap:4px; padding:0 22px; border-bottom:1px solid var(--line); max-width:960px; margin:0 auto; }
@@ -55,19 +65,40 @@ pre { background:#0a0c10; color:#cdd3e0; padding:10px; border-radius:6px; overfl
   background:var(--panel); color:var(--text); font-size:13.5px; }
 .tabhead { font-size:16px; margin:0 0 16px; }
 
-/* record cards (Failed tab) */
-.record { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+/* Record cards — History and Failed share ONE layout, so a row looks the same in both tabs and
+   whatever its content length. Text lives in a flexible column that may wrap or ellipsize; the
+   buttons live in a fixed-width column that never moves. */
+.record { display:flex; align-items:flex-start; gap:14px;
+  background:var(--panel); border:1px solid var(--line); border-radius:10px;
   padding:12px 14px; margin-bottom:12px; }
 .record.fail { border-left:3px solid var(--err); }
-.rec-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-.rec-head .time { margin-left:auto; font-size:12px; }
-.badge-err { color:var(--err); font-weight:600; font-size:12.5px; }
-.rec-err { color:var(--err); font-size:12.5px; margin-top:6px; }
 .record.ok { border-left:3px solid var(--ok); }
-.badge-ok { color:var(--ok); font-weight:600; font-size:12.5px; }
-.badge-rev { color:var(--upd); font-weight:600; font-size:12.5px; }
-.rec-action { display:inline; margin:0; }
+.rec-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:4px; }
+.rec-title { display:flex; align-items:center; gap:10px; min-width:0; }
+.rec-title .svc { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rec-ver { display:flex; align-items:baseline; gap:7px; flex-wrap:wrap; }
+.rec-ver .repo { font-size:12px; }
+.rec-ver .arrow { color:var(--muted); }
+.rec-meta { font-size:12px; }
+/* fixed action column: the rollback button lands in the same place on every row, always */
+.rec-actions { flex:none; width:132px; display:flex; flex-direction:column; gap:6px; }
+.rec-actions .btn { margin:0; width:100%; text-align:center; }
+.rec-actions .rec-action { display:block; margin:0; }
+.rec-slot { display:block; height:0; } /* holds the column's shape when a row has no button */
+.badge-err { color:var(--err); font-weight:600; font-size:12.5px; white-space:nowrap; }
+.badge-rev { color:var(--upd); font-weight:600; font-size:12.5px; white-space:nowrap; }
+/* one-line error preview; the full text is a click away in the popout */
+.rec-err { display:flex; align-items:baseline; gap:8px; color:var(--err); font-size:12.5px; min-width:0; }
+.rec-err .msg { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.linkish { flex:none; background:none; border:none; padding:0; color:var(--accent);
+  font:inherit; cursor:pointer; text-decoration:underline; }
 .btn.warn { background:var(--upd); border-color:var(--upd); color:#1a1d26; margin-left:0; }
+@media (max-width:620px) {
+  .record { flex-direction:column; }
+  .rec-actions { width:100%; flex-direction:row; }
+  .rec-actions .rec-action { flex:1; }
+  .rec-slot { display:none; }
+}
 
 /* modal */
 .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex;
@@ -172,10 +203,20 @@ details.projgroup table { border:none; border-radius:0; }
 .host-card h3 { margin:0 0 6px; font-size:14px; display:flex; align-items:center; gap:8px; }
 .chips { margin-top:6px; }
 
-/* dedicated, consistent rollback slot on History rows */
-.rec-rollback { margin-left: 12px; min-width: 108px; text-align: right; flex: none; }
-.rec-rollback .rec-action { display: inline; margin: 0; }
 .rb-expired { cursor: not-allowed !important; }
+
+/* details popout (logs + full error), replacing the inline expandable panels */
+.modal.modal-lg { max-width:min(900px, calc(100vw - 40px)); width:900px; }
+.log-head { display:flex; align-items:baseline; gap:10px; margin:0 0 14px; }
+.log-head b { font-size:15px; }
+.log-head .x { margin-left:auto; background:none; border:none; color:var(--muted);
+  font-size:15px; cursor:pointer; align-self:flex-start; }
+.log-sec { margin-bottom:14px; }
+.log-sec h4 { margin:0 0 6px; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
+  color:var(--muted); font-weight:600; }
+.log-sec pre { margin:0; max-height:min(52vh,460px); }
+.log-sec pre.err-text { color:#ffc9c9; border-left:3px solid var(--err); }
+.log-empty { color:var(--muted); font-size:13px; }
 
 /* major version bump indicator */
 .major-tag { display:inline-block; margin-left:8px; padding:1px 7px; border-radius:10px; font-size:11px;

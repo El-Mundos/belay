@@ -3,13 +3,16 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/El-Mundos/belay/internal/cluster"
+	"github.com/El-Mundos/belay/internal/compose"
 	"github.com/El-Mundos/belay/internal/notify"
 	"github.com/El-Mundos/belay/internal/registry"
 	"github.com/El-Mundos/belay/internal/store"
@@ -121,13 +124,14 @@ type hostView struct {
 	Online   bool
 	Ago      string
 	Projects []cluster.Project
-	Version  string // agent build version ("" = older than the field)
+	Version  string // build version ("" = an agent older than the field)
 	Stale    bool   // differs from this server's version
+	Local    bool   // this Belay itself, not an agent
 }
 
 func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	s.agentsMu.Lock()
-	hosts := make([]hostView, 0, len(s.agents))
+	hosts := make([]hostView, 0, len(s.agents)+1)
 	for _, c := range s.agents {
 		online := time.Since(c.lastSeen) < 90*time.Second
 		hosts = append(hosts, hostView{
@@ -140,10 +144,38 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	}
 	s.agentsMu.Unlock()
 	sort.Slice(hosts, func(i, j int) bool { return hosts[i].Host < hosts[j].Host })
+	// The server's own host is a host like any other — it runs stacks, it has a version, it can be
+	// out of date. Leaving it out made "Hosts" mean "everywhere except here", so a single-host
+	// install saw an empty page describing a machine it was looking at.
+	hosts = append([]hostView{s.localHost()}, hosts...)
 	data := s.base(r, "hosts")
 	data["Hosts"] = hosts
 	data["AgentsEnabled"] = s.agentsEnabled()
 	s.render(w, "hosts", data)
+}
+
+// localHost describes the machine this server runs on, in the same shape as an agent.
+func (s *Server) localHost() hostView {
+	name, _ := os.Hostname()
+	if name == "" {
+		name = "local"
+	}
+	h := hostView{
+		Host: name, Online: true, Ago: "now", Local: true,
+		Version: version.Version,
+	}
+	for _, p := range s.cfg.Projects {
+		cp := cluster.Project{Name: p.Name, File: p.File}
+		if services, err := compose.Services(p.File); err == nil {
+			for _, sv := range services {
+				cp.Services = append(cp.Services, cluster.Service{
+					Name: sv.Name, Image: sv.Image, Protected: s.protectedReason(sv.Name, sv.Image),
+				})
+			}
+		}
+		h.Projects = append(h.Projects, cp)
+	}
+	return h
 }
 
 // handleRemoteUpdate resolves the newest stable tag for a remote service (the server has registry
@@ -159,6 +191,10 @@ func (s *Server) handleRemoteUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := r.FormValue("image")
+	if why := s.remoteProtected(host, r.FormValue("file"), r.FormValue("s")); why != "" {
+		fmt.Fprintf(w, `<span class="err">🔒 %s</span>`, html.EscapeString(why))
+		return
+	}
 	ref := registry.ParseRef(current)
 	newer, comparable, err := s.reg.Newer(r.Context(), ref)
 	switch {
@@ -190,6 +226,9 @@ func (s *Server) enqueue(host, file, service, image string) bool {
 	s.agentsMu.Unlock()
 	if c == nil {
 		return false
+	}
+	if s.remoteProtected(host, file, service) != "" {
+		return false // the agent's own container / Docker transport; it would kill the executor
 	}
 	cmd := cluster.Command{ID: newToken()[:12], Kind: "update", Project: file, Service: service, Image: image, Auth: s.authForImage(image)}
 	select {

@@ -26,7 +26,7 @@ type Notify struct {
 // Registry holds credentials for a private container registry, used both for the version-check API
 // calls and (via a generated docker config.json) for the actual pull. Token is a password or PAT.
 type Registry struct {
-	Host     string `json:"host"`     // docker.io | ghcr.io | registry.example.com:5000
+	Host     string `json:"host"` // docker.io | ghcr.io | registry.example.com:5000
 	Username string `json:"username"`
 	Token    string `json:"token"`
 }
@@ -59,6 +59,7 @@ type Settings struct {
 	Concurrency         int              `json:"concurrency"`           // parallel updates in update-all (min 1)
 	MetricsToken        string           `json:"metrics_token"`         // if set, /metrics requires ?token= or Bearer
 	RequireGroup        string           `json:"require_group"`         // if set, forward-auth callers must belong to this group
+	Theme               string           `json:"theme"`                 // "" = follow the OS, else "light" or "dark"
 	Notify              Notify           `json:"notify"`
 	Registries          []Registry       `json:"registries"` // private-registry credentials for checks + pulls
 	Pins                map[string]bool  `json:"pins"`       // key = project\x00service → ignored for updates

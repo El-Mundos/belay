@@ -60,6 +60,17 @@
     </tbody>
   </table>
 
+  <h3 style="margin-top:22px">Appearance</h3>
+  <label>Theme
+    <select name="theme">
+      <option value=""{{if eq .S.Theme ""}} selected{{end}}>Follow system</option>
+      <option value="dark"{{if eq .S.Theme "dark"}} selected{{end}}>Dark</option>
+      <option value="light"{{if eq .S.Theme "light"}} selected{{end}}>Light</option>
+    </select>
+  </label>
+  <p class="muted small">Applies to everyone using this Belay — it is a server setting, not a
+  per-browser one.</p>
+
   <h3 style="margin-top:22px">Advanced</h3>
   <label>Protect <code>/metrics</code> with a token <span class="muted small">(blank = open)</span>
     <input type="text" name="metrics_token" value="{{.S.MetricsToken}}" placeholder="a secret — then scrape /metrics?token=…">

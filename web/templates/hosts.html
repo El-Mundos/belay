@@ -1,27 +1,53 @@
 {{define "content"}}
 <h2 class="tabhead">Hosts</h2>
 {{if not .AgentsEnabled}}
-<p class="muted">Multi-host is disabled. Start the server with <code>--agent-token</code> (or
-<code>BELAY_AGENT_TOKEN</code>) and run <code>belay agent --server &lt;url&gt; --token &lt;token&gt;</code>
-on the other host.</p>
+<p class="muted">Multi-host is disabled — only this host is shown. Start the server with
+<code>--agent-token</code> (or <code>BELAY_AGENT_TOKEN</code>) and run
+<code>belay agent --server &lt;url&gt; --token &lt;token&gt;</code> on another host to add one.</p>
 {{end}}
-{{if and .AgentsEnabled (not .Hosts)}}<p class="muted">No agents connected yet.</p>{{end}}
 <div class="host-cards">
 {{range $h := .Hosts}}
-<div class="card host-card">
+<div class="card host-card{{if $h.Local}} host-local{{end}}">
   <h3>{{$h.Host}}
+    {{if $h.Local}}<span class="chip">this host</span>{{end}}
     {{if $h.Online}}<span class="badge-ok">● online</span>{{else}}<span class="muted small">○ last seen {{$h.Ago}} ago</span>{{end}}
   </h3>
   <p class="muted small">{{len $h.Projects}} stack(s)
-    {{if $h.Stale}}
+    {{if $h.Local}}
+      <span class="muted small">· server · v{{$h.Version}}</span>
+    {{else if $h.Stale}}
       <span class="major-tag" title="This agent is not running the same version as the server. Newer commands may carry fields it ignores silently — update it.">version {{if $h.Version}}{{$h.Version}}{{else}}unknown{{end}}</span>
     {{else}}
-      <span class="muted small">· v{{$h.Version}}</span>
+      <span class="muted small">· agent · v{{$h.Version}}</span>
     {{end}}
   </p>
   <div class="chips">{{range $h.Projects}}<span class="chip">{{.Name}}</span>{{end}}</div>
+  {{$prot := protected $h}}
+  {{if $prot}}
+    <p class="muted small host-prot" title="Belay never updates the container it is running in, nor the service it reaches Docker through — those are handled by self-update instead.">
+      🔒 {{range $prot}}<span class="chip">{{.}}</span>{{end}}
+    </p>
+  {{end}}
+  <div class="host-actions">
+    {{if $h.Local}}
+      {{if $.SelfUpdate}}
+        <form method="post" action="/self-update" class="rec-action"
+              onsubmit="return belayConfirm('Update Belay itself now? Belay will restart from the new image (a few seconds of downtime). If the new image fails to stay up, the previous container is put back automatically.', this, 'Update Belay')">
+          <button class="btn" type="submit">⬆ Update Belay</button>
+        </form>
+      {{else}}
+        <span class="muted small">up to date</span>
+      {{end}}
+    {{else if $h.Stale}}
+      <button class="btn" hx-post="/agent-update" hx-vals='{"host":"{{$h.Host}}"}' hx-swap="outerHTML"
+              hx-confirm="Update the agent on {{$h.Host}}? It hands off to a helper container, drops off this list, and re-registers on the new image. If the new image fails to stay up, the previous container is restored."
+              data-ok-label="Update agent">⬆ Update agent</button>
+    {{else}}
+      <span class="muted small">up to date</span>
+    {{end}}
+  </div>
 </div>
 {{end}}
 </div>
-{{if .Hosts}}<p class="muted small">Their services appear in the <a href="/">Updates</a> tab, grouped by host — update them from there.</p>{{end}}
+<p class="muted small">Services appear in the <a href="/">Updates</a> tab, grouped by host — update them from there.</p>
 {{end}}

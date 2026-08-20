@@ -1,17 +1,30 @@
 {{define "content"}}
 <h2 class="tabhead">Failed updates</h2>
-<div id="failed-list" hx-get="/failed" hx-trigger="every 6s" hx-select="#failed-list" hx-target="#failed-list" hx-swap="outerHTML">
+<div id="failed-list" data-poll data-rev="{{.Rev}}"
+     hx-get="/failed" hx-trigger="every 6s" hx-select="#failed-list" hx-target="#failed-list" hx-swap="outerHTML">
 {{if not .Records}}<p class="muted">No failed updates. 🎉</p>{{end}}
 {{range .Records}}
 <div class="record fail">
-  <div class="rec-head">
-    <span class="svc">{{.Service}}</span>
-    <span class="mono">{{.From}} → {{.To}}</span>
-    {{if eq .Outcome "rolled_back"}}<span class="badge-err">↩ rolled back</span>{{else}}<span class="badge-err">✕ error</span>{{end}}
-    <span class="muted time">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}}</span>
+  <div class="rec-main">
+    <div class="rec-title">
+      <span class="svc">{{.Service}}</span>
+      {{if eq .Outcome "rolled_back"}}<span class="badge-err">↩ rolled back</span>{{else}}<span class="badge-err">✕ error</span>{{end}}
+    </div>
+    <div class="rec-ver mono">
+      {{if .Repo}}<span class="repo muted">{{.Repo}}</span>{{end}}
+      <span class="muted">{{.FromRef}}</span><span class="arrow">→</span><span class="err">{{.ToRef}}</span>
+    </div>
+    {{if .ErrPreview}}
+      <div class="rec-err">
+        <span class="msg" title="{{.ErrPreview}}">{{.ErrPreview}}</span>
+        {{if .ErrMore}}<button class="linkish" onclick="belayRecord({{.ID}})">full error</button>{{end}}
+      </div>
+    {{end}}
+    <div class="rec-meta muted">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}}</div>
   </div>
-  {{if .Err}}<div class="rec-err">{{.Err}}</div>{{end}}
-  {{if .Logs}}<details data-log="rec-{{.ID}}"><summary>logs</summary><pre>{{.Logs}}</pre></details>{{end}}
+  <div class="rec-actions">
+    {{if .HasDetails}}<button class="btn ghost" onclick="belayRecord({{.ID}})">Details</button>{{else}}<span class="rec-slot"></span>{{end}}
+  </div>
 </div>
 {{end}}
 </div>
