@@ -179,6 +179,26 @@ func (m *Manager) Available(ctx context.Context) (bool, error) {
 	return tagID != "" && tagID != runningID, nil
 }
 
+// TargetVersion is the version of the image the tracked tag currently resolves to -- the version an
+// update WOULD move to. It is read from the image's OCI label rather than by running the binary:
+// the image is already pulled, and starting a container just to ask it its version is a silly price
+// for a line of text. Empty when the label is absent (an image built without it).
+func (m *Manager) TargetVersion(ctx context.Context) string {
+	if !m.Enabled() {
+		return ""
+	}
+	out, err := dockerOut(ctx, "image", "inspect", m.image,
+		"--format", `{{index .Config.Labels "org.opencontainers.image.version"}}`)
+	if err != nil {
+		return ""
+	}
+	v := strings.TrimSpace(out)
+	if v == "<no value>" { // docker renders a missing label this way
+		return ""
+	}
+	return v
+}
+
 // helperName is the fixed name of the throwaway container that performs the swap. Fixed, not
 // random, so a second attempt replaces the first rather than racing it, and so any Belay can find
 // and reap a finished one.

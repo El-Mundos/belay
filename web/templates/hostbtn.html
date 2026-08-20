@@ -1,0 +1,40 @@
+{{/*
+Shared fragments for a host's primary action and the self-update banner.
+
+They live in their own file because two callers must render them identically: the Hosts page, and
+the check endpoint, which swaps them back out-of-band so a check that finds an update changes the
+button and raises the banner immediately. Duplicating the markup in a Go string is how those two
+drift apart.
+*/}}
+
+{{define "hostPrimary"}}
+{{if .Local}}
+  {{if .Stale}}
+    <form method="post" action="/self-update" class="host-action"
+          onsubmit="return belayConfirm('Update Belay itself now? Belay restarts from the new image (a few seconds of downtime). If it fails to stay up, the previous container is put back automatically.', this, 'Update Belay')">
+      <button class="btn" type="submit">⬆ Update Belay</button>
+    </form>
+  {{else}}
+    <button class="btn ghost" disabled title="Belay is running the newest image it knows about">Up to date</button>
+  {{end}}
+{{else if .Stale}}
+  <button class="btn" hx-post="/agent-update" hx-vals='{"host":"{{.Host}}"}'
+          hx-target="#chk-{{.Idx}}" hx-swap="innerHTML"
+          hx-confirm="Update the agent on {{.Host}}? It hands off to a helper container, drops off this list, and re-registers on the new image. If the new image fails to stay up, the previous container is restored."
+          data-ok-label="Update agent">⬆ Update agent</button>
+{{else}}
+  <button class="btn ghost" disabled title="This agent matches the server's version">Up to date</button>
+{{end}}
+{{end}}
+
+{{define "subanner"}}
+{{if .SelfUpdate}}
+<div class="selfupdate-banner">
+  ⬆ <b>Belay</b> {{if .SelfUpdateVersion}}v{{.Version}} → <b>v{{.SelfUpdateVersion}}</b> is available.{{else}}has a newer image available <span class="muted">({{.SelfUpdateImage}})</span>.{{end}}
+  <form method="post" action="/self-update" style="display:inline"
+        onsubmit="return belayConfirm('Update Belay itself now? Belay will restart from the new image (a few seconds of downtime).', this)">
+    <button class="btn" type="submit">Update Belay</button>
+  </form>
+</div>
+{{end}}
+{{end}}

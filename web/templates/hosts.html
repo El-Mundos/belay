@@ -47,24 +47,8 @@
   {{/* Pinned to the bottom of the card in a fixed two-slot grid, so every card's buttons line up
        with every other card's whatever sits above them. */}}
   <div class="host-actions">
-    {{if $h.Local}}
-      {{if $h.Stale}}
-        <form method="post" action="/self-update" class="host-action"
-              onsubmit="return belayConfirm('Update Belay itself now? Belay restarts from the new image (a few seconds of downtime). If it fails to stay up, the previous container is put back automatically.', this, 'Update Belay')">
-          <button class="btn" type="submit">⬆ Update Belay</button>
-        </form>
-      {{else}}
-        <button class="btn ghost" disabled title="Belay is running the newest image it knows about">Up to date</button>
-      {{end}}
-    {{else if $h.Stale}}
-      <button class="btn" hx-post="/agent-update" hx-vals='{"host":"{{$h.Host}}"}'
-              hx-target="#chk-{{$i}}" hx-swap="innerHTML"
-              hx-confirm="Update the agent on {{$h.Host}}? It hands off to a helper container, drops off this list, and re-registers on the new image. If the new image fails to stay up, the previous container is restored."
-              data-ok-label="Update agent">⬆ Update agent</button>
-    {{else}}
-      <button class="btn ghost" disabled title="This agent matches the server's version">Up to date</button>
-    {{end}}
-    <button class="btn ghost" hx-post="/host-check" hx-vals='{"host":"{{if $h.Local}}{{else}}{{$h.Host}}{{end}}"}'
+    <div class="host-slot" id="pri-{{$i}}">{{template "hostPrimary" $h}}</div>
+    <button class="btn ghost" hx-post="/host-check" hx-vals='{"host":"{{if $h.Local}}{{else}}{{$h.Host}}{{end}}","idx":"{{$i}}"}'
             hx-target="#chk-{{$i}}" hx-swap="innerHTML">Check for updates</button>
   </div>
   <div class="host-status" id="chk-{{$i}}"></div>

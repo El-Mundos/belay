@@ -57,20 +57,21 @@ type Config struct {
 }
 
 type Server struct {
-	cfg      Config
-	reg      *registry.Client
-	eng      *engine.Engine
-	store    *store.Store
-	set      *config.Store
-	notify   *notify.Notifier
-	tpl      map[string]*template.Template
-	mu       sync.Mutex
-	sess     map[string]struct{}
-	checks   map[string]checkResult // auto-check cache, key project\x00service
-	jobs     *jobManager            // live activity panel (SSE)
-	su       *selfupdate.Manager    // belay self-update (nil-safe if not in a container)
-	hostName string                 // the machine Belay manages (not this container's id)
-	suAvail  bool                   // cached: a newer belay image is available
+	cfg       Config
+	reg       *registry.Client
+	eng       *engine.Engine
+	store     *store.Store
+	set       *config.Store
+	notify    *notify.Notifier
+	tpl       map[string]*template.Template
+	mu        sync.Mutex
+	sess      map[string]struct{}
+	checks    map[string]checkResult // auto-check cache, key project\x00service
+	jobs      *jobManager            // live activity panel (SSE)
+	su        *selfupdate.Manager    // belay self-update (nil-safe if not in a container)
+	hostName  string                 // the machine Belay manages (not this container's id)
+	suAvail   bool                   // cached: a newer belay image is available
+	suVersion string                 // cached: the version that newer image reports
 
 	dockerCfgDir string // DOCKER_CONFIG dir holding generated auths for private-registry pulls
 
@@ -153,17 +154,18 @@ func New(cfg Config) *Server {
 			func() bool { return set.Get().InQuietHours(time.Now().Hour()) },
 		),
 		tpl: map[string]*template.Template{
-			"dashboard":    page("templates/layout.html", "templates/dashboard.html"),
-			"failed":       page("templates/layout.html", "templates/failed.html"),
-			"history":      page("templates/layout.html", "templates/history.html"),
-			"login":        page("templates/layout.html", "templates/login.html"),
-			"settings":     page("templates/layout.html", "templates/settings.html"),
+			"dashboard":    page("templates/layout.html", "templates/hostbtn.html", "templates/dashboard.html"),
+			"failed":       page("templates/layout.html", "templates/hostbtn.html", "templates/failed.html"),
+			"history":      page("templates/layout.html", "templates/hostbtn.html", "templates/history.html"),
+			"login":        page("templates/layout.html", "templates/hostbtn.html", "templates/login.html"),
+			"settings":     page("templates/layout.html", "templates/hostbtn.html", "templates/settings.html"),
 			"status":       page("templates/status.html"),
 			"result":       page("templates/result.html"),
 			"activity":     page("templates/activity.html"),
-			"hosts":        page("templates/layout.html", "templates/hosts.html"),
-			"review":       page("templates/layout.html", "templates/review.html"),
+			"hosts":        page("templates/layout.html", "templates/hostbtn.html", "templates/hosts.html"),
+			"review":       page("templates/layout.html", "templates/hostbtn.html", "templates/review.html"),
 			"reviewstatus": page("templates/reviewstatus.html"),
+			"hostcheck":    page("templates/hostbtn.html", "templates/hostcheck.html"),
 		},
 		sess:     map[string]struct{}{},
 		checks:   map[string]checkResult{},
@@ -358,12 +360,14 @@ func (s *Server) base(r *http.Request, active string) map[string]any {
 	}
 	s.mu.Lock()
 	m["SelfUpdate"] = s.suAvail
+	m["SelfUpdateVersion"] = s.suVersion
 	s.mu.Unlock()
 	if s.su != nil {
 		m["SelfUpdateImage"] = s.su.Image()
 	}
 	m["AgentsEnabled"] = s.agentsEnabled()
 	m["HostCount"] = s.agentCount()
+	m["Version"] = version.Version // what we are running, for confirms and the banner
 	m["Theme"] = s.set.Get().Theme // "" = follow the OS
 	return m
 }
@@ -1289,12 +1293,16 @@ func (s *Server) project(id string) (Project, bool) {
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
+	t := s.tpl[name]
+	// A fragment is a template set with no layout in it — asking the set is self-maintaining,
+	// where a hardcoded list of fragment names silently renders the wrong thing every time a new
+	// one is added and forgotten.
 	root := "layout.html"
-	if name == "status" || name == "result" || name == "activity" || name == "reviewstatus" {
+	if t == nil || t.Lookup(root) == nil {
 		root = name
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tpl[name].ExecuteTemplate(w, root, data); err != nil {
+	if err := t.ExecuteTemplate(w, root, data); err != nil {
 		log.Printf("render %s: %v", name, err)
 	}
 }

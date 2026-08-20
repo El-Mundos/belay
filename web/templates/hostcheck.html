@@ -1,0 +1,12 @@
+{{define "hostcheck"}}
+{{/*
+The answer to a "Check for updates" click. The status line is the normal swap; everything else
+rides along out-of-band, so finding an update flips that host's button and raises the banner in the
+same response. Telling someone to reload to see what you already know is not an answer.
+*/}}
+<span class="{{.Class}} small">{{.Msg}}</span>
+{{if .Refresh}}
+<div class="host-slot" id="pri-{{.Host.Idx}}" hx-swap-oob="true">{{template "hostPrimary" .Host}}</div>
+<div id="su-banner" hx-swap-oob="true">{{template "subanner" .}}</div>
+{{end}}
+{{end}}

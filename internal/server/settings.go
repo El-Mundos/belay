@@ -274,6 +274,9 @@ func (s *Server) selfUpdateWatch() {
 		if err == nil {
 			s.mu.Lock()
 			s.suAvail = avail
+			if avail {
+				s.suVersion = s.su.TargetVersion(context.Background())
+			}
 			s.mu.Unlock()
 		}
 		time.Sleep(30 * time.Minute)
@@ -408,30 +411,58 @@ func (s *Server) checkBelayImage(ctx context.Context) (bool, error) {
 	}
 	s.mu.Lock()
 	s.suAvail = avail
+	if avail {
+		s.suVersion = s.su.TargetVersion(ctx)
+	}
 	s.mu.Unlock()
 	return avail, nil
 }
 
+// checkView is one card's answer. Refresh carries the out-of-band half: the host's primary button
+// and the banner, so a check that finds an update changes the page rather than describing what a
+// reload would show.
+type checkView struct {
+	Msg               string
+	Class             string // "ok" | "muted" | "err"
+	Refresh           bool
+	Host              hostView
+	SelfUpdate        bool
+	SelfUpdateImage   string
+	SelfUpdateVersion string
+	Version           string
+}
+
 // handleHostCheck answers "is this host behind?" for one card — the local host or an agent.
 func (s *Server) handleHostCheck(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	host := r.FormValue("host")
+	idx, _ := strconv.Atoi(r.FormValue("idx"))
 	// Best effort: only the LOCAL card's answer depends on the registry. An agent is judged by the
 	// version it reported against the version we run, which needs neither Docker nor a network --
 	// so a failed registry check must not turn every agent card's button into an error.
 	avail, err := s.checkBelayImage(r.Context())
+
+	v := checkView{Class: "muted", Host: hostView{Idx: idx}}
 	if host == "" { // the local host: compare the registry against what we are running
-		if err != nil {
-			fmt.Fprintf(w, `<span class="err small">check failed: %s</span>`, html.EscapeString(err.Error()))
-			return
+		switch {
+		case err != nil:
+			v.Class, v.Msg = "err", "check failed: "+err.Error()
+		case avail:
+			// Flip this card's button and raise the banner in the same response.
+			v.Class = "ok"
+			v.Msg = "a newer image is available"
+			v.Refresh, v.SelfUpdate, v.SelfUpdateImage = true, true, s.su.Image()
+			s.mu.Lock()
+			v.SelfUpdateVersion, v.Version = s.suVersion, version.Version
+			s.mu.Unlock()
+			v.Host = s.localHost()
+			v.Host.Idx = idx
+		default:
+			v.Msg = "up to date (v" + version.Version + ", just checked)"
 		}
-		if avail {
-			fmt.Fprint(w, `<span class="ok small">a newer image is available — reload for the button</span>`)
-			return
-		}
-		fmt.Fprintf(w, `<span class="muted small">up to date (v%s, just checked)</span>`, html.EscapeString(version.Version))
+		s.render(w, "hostcheck", v)
 		return
 	}
+
 	s.agentsMu.Lock()
 	c := s.agents[host]
 	var av string
@@ -441,20 +472,19 @@ func (s *Server) handleHostCheck(w http.ResponseWriter, r *http.Request) {
 	s.agentsMu.Unlock()
 	switch {
 	case c == nil:
-		fmt.Fprint(w, `<span class="err small">host offline</span>`)
+		v.Class, v.Msg = "err", "host offline"
 	case av == "":
-		fmt.Fprint(w, `<span class="err small">agent too old to report its version — update it</span>`)
+		v.Class, v.Msg = "err", "agent too old to report its version — update it"
 	case av != version.Version:
-		fmt.Fprintf(w, `<span class="ok small">v%s → v%s available</span>`,
-			html.EscapeString(av), html.EscapeString(version.Version))
+		v.Class, v.Msg = "ok", "v"+av+" → v"+version.Version+" available"
 	case err == nil && avail:
 		// The agent matches us, but we are both behind the registry — say so, rather than
 		// "up to date", which would be true only relative to a server that is itself stale.
-		fmt.Fprintf(w, `<span class="muted small">matches this server (v%s) — but a newer image exists; update the main host first</span>`,
-			html.EscapeString(av))
+		v.Msg = "matches this server (v" + av + ") — but a newer image exists; update the main host first"
 	default:
-		fmt.Fprintf(w, `<span class="muted small">up to date (v%s, just checked)</span>`, html.EscapeString(av))
+		v.Msg = "up to date (v" + av + ", just checked)"
 	}
+	s.render(w, "hostcheck", v)
 }
 
 // handleHostsCheckAll refreshes the registry once and re-renders every card, so a fleet answers in
