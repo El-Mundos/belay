@@ -42,6 +42,44 @@ for each selected service:
 Rollback scope is **image-tag only** (clean and reliable). Config-coupled updates (a new version
 needing a new env var) revert the tag and tell you to fix the config and retry — by design.
 
+### Tracking every kind of tag
+
+Container tags move in two different ways, and only tracking one of them leaves services silently
+stuck, so Belay watches both:
+
+- **The tag name changes** — `1.27.1` → `1.27.2`. Compared by version, offered as a normal update,
+  and the compose file is rewritten. Only tags of the same shape are compared, so a service pinned
+  to `15` is offered `16` and never `15.4.0`: rewriting it would quietly turn the rolling tag you
+  chose into a frozen one.
+- **The tag stays, the build behind it changes** — `15` re-pointed from 15.0.0 to 15.4.0, or any
+  `latest` / `stable`. There is no new name to notice, so Belay compares the registry's digest for
+  the tag against the digest you actually pulled. Applying it re-pulls the same tag and leaves your
+  compose file untouched.
+
+Because a rebase keeps the tag, "roll back to the old tag" would mean pulling the build that just
+failed. Belay instead pins the rollback to the digest that was running, so a failed rebase leaves the
+service on the exact image it had before — and stops the bad build being pulled again.
+
+> Digest tracking inspects the local image, so it currently covers services on the Belay host.
+> Remote agents report their images but not yet their digests, so rebases there go unnoticed.
+
+### What the health gate cannot catch
+
+Being honest about the edges, because a safety tool that overstates its guarantees is worse than one
+that doesn't:
+
+- **"Healthy" is not "correct."** The gate proves a container started and answers; it cannot prove
+  the new version behaves. A service can pass every rung while being subtly broken — an identity
+  provider that boots fine but silently drops a claim from its tokens, say.
+- **A rollback can be incomplete.** Reverting the tag restores the *code*, not everything the failed
+  version did on its way down. The common case is a new version writing schema migrations to a
+  database owned by a **sibling service** in the same stack: belay's volume snapshot covers the
+  service being updated, so it never took that sibling's data. Belay now flags this when it happens,
+  but flagging is all it can do — undoing it is yours.
+- **Therefore: group services that must move together.** If a version split between two services
+  breaks them (an app and its migration worker), put them in the same group in Settings so a partial
+  application is reverted rather than left half-done.
+
 ## Architecture
 
 One binary, two roles:

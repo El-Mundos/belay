@@ -513,8 +513,33 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		if src, e := s.reg.SourceRepo(r.Context(), ref); e == nil && src != "" {
 			view["Changelog"] = registry.ChangelogURL(src, latest)
 		}
+	default:
+		// No newer tag — but the tag itself may now point at a different build. This is the only
+		// signal for "latest"/"stable" and for rolling tags like "15", which never change name.
+		// Reported as up-to-date for remote services, whose digests the server cannot inspect.
+		if host == "" && !strings.Contains(image, "@") {
+			if up := s.rebaseFor(r.Context(), image); up {
+				view["Comparable"] = true
+				view["Rebase"] = true
+				view["Latest"] = ref.Tag + " (new build)"
+				view["Count"] = 1
+				view["Target"] = image
+			}
+		}
 	}
 	s.render(w, "status", view)
+}
+
+// rebaseFor reports whether the registry's digest for an image's tag differs from the digest running
+// locally. Any uncertainty (registry unreachable, image built locally and never pulled) answers
+// "no" — a check that guesses would produce updates that do nothing.
+func (s *Server) rebaseFor(ctx context.Context, image string) bool {
+	remote, err := s.reg.Digest(ctx, registry.ParseRef(image))
+	if err != nil || remote == "" {
+		return false
+	}
+	have, err := agent.ImageDigest(ctx, image)
+	return err == nil && have != "" && have != remote
 }
 
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +582,7 @@ type pendingUpd struct {
 	File                   string
 	PID                    int
 	From, To, Latest       string
+	Rebase                 bool // same tag, new build behind it
 	Steps                  []verStep
 }
 
@@ -598,27 +624,28 @@ func majorOf(tag string) (int, bool) {
 
 func (s *Server) pendingUpdates(ctx context.Context) []pendingUpd {
 	var out []pendingUpd
-	allowMajor := s.set.Get().AllowMajor
 	add := func(local bool, host, projName, file string, pid int, svcName, image string) {
 		if image == "" || !strings.Contains(image, ":") || s.set.Pinned(file, svcName) {
 			return
 		}
+		up := s.checkService(ctx, image, local)
+		if up.Err != nil || up.Target == "" {
+			return
+		}
 		ref := registry.ParseRef(image)
-		newer, comparable, err := s.reg.Newer(ctx, ref)
-		if err != nil || !comparable || len(newer) == 0 {
-			return
-		}
-		newer, _ = filterMajor(ref.Tag, newer, allowMajor) // don't auto-include major bumps
-		if len(newer) == 0 {
-			return
-		}
-		latest := newer[len(newer)-1]
 		u := pendingUpd{
 			Host: host, Project: projName, Service: svcName, Local: local, File: file, PID: pid,
-			From: image, To: strings.TrimSuffix(image, ":"+ref.Tag) + ":" + latest, Latest: latest,
+			From: image, To: up.Target, Rebase: up.Rebase,
 		}
+		if up.Rebase {
+			// Same tag, new build: there is no version to name, and no release to link to.
+			u.Latest = ref.Tag + " (new build)"
+			out = append(out, u)
+			return
+		}
+		u.Latest = up.Newer[len(up.Newer)-1]
 		src, _ := s.reg.SourceRepo(ctx, ref)
-		for _, v := range newer {
+		for _, v := range up.Newer {
 			st := verStep{Version: v}
 			if src != "" {
 				st.Changelog = registry.ChangelogURL(src, v)
@@ -746,8 +773,90 @@ func (s *Server) handleReviewCheck(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "reviewstatus", view)
 }
 
+// svcUpdate is what a single service has waiting for it: either a newer version tag, or a rebase —
+// the same tag now resolving to a different build.
+type svcUpdate struct {
+	Target string   // image ref to deploy; "" means nothing to do
+	Rebase bool     // Target equals the current ref; apply by pulling, not by rewriting the tag
+	Newer  []string // version steps, oldest first (empty for a rebase)
+	Err    error
+}
+
+// checkService decides what update a service has, tracking BOTH ways a container image can move.
+//
+// Version tags are compared by name: "1.27.1" -> "1.27.2". Tags that are re-pointed in place cannot
+// be, because the name never changes — "15" silently becomes 15.4.0, and "latest" carries no version
+// at all. Those are caught by comparing the registry's digest for the tag against the digest that was
+// actually pulled locally, which is the only signal that distinguishes them. Version bumps take
+// precedence: if a genuinely newer tag exists, that is the more useful thing to report.
+//
+// Digest tracking needs to inspect the local image, so it applies to services on this host only;
+// remote agents report their images but not yet their digests, so rebases there go unnoticed.
+func (s *Server) checkService(ctx context.Context, image string, local bool) svcUpdate {
+	// A digest-pinned ref is deliberately frozen — that is what pinning by digest means.
+	if strings.Contains(image, "@") {
+		return svcUpdate{}
+	}
+	ref := registry.ParseRef(image)
+	newer, comparable, err := s.reg.Newer(ctx, ref)
+	if err != nil {
+		return svcUpdate{Err: err}
+	}
+	if comparable && len(newer) > 0 {
+		newer, _ = filterMajor(ref.Tag, newer, s.set.Get().AllowMajor)
+		if len(newer) > 0 {
+			latest := newer[len(newer)-1]
+			return svcUpdate{Target: strings.TrimSuffix(image, ":"+ref.Tag) + ":" + latest, Newer: newer}
+		}
+	}
+	if local && s.rebaseFor(ctx, image) {
+		return svcUpdate{Target: image, Rebase: true}
+	}
+	return svcUpdate{}
+}
+
+// batch is a set of pending updates that must be applied together, in order, and abandoned as soon
+// as one of them fails. Every update belongs to exactly one batch.
+type batch struct {
+	key      string // display name used when reporting a skip
+	lockstep bool   // true => already-applied members are rolled back if a later one fails
+	ups      []pendingUpd
+}
+
+// batches partitions pending updates into units that are applied sequentially with a failure guard.
+//
+// An explicitly configured ServiceGroup forms a lockstep batch: its members are meant to run the
+// same version, so a partial application is worse than none and the successes are reverted. Anything
+// else is grouped by compose file, which only stops the run — services sharing a stack usually share
+// a database or a config contract, so continuing to upgrade siblings after one has just failed tends
+// to compound the damage rather than make progress.
+func (s *Server) batches(ups []pendingUpd) []*batch {
+	set := s.set.Get()
+	var order []*batch
+	byKey := map[string]*batch{}
+	for _, u := range ups {
+		key, lockstep := "file:"+u.Host+"\x00"+u.File, false
+		if g, ok := set.GroupFor(u.File, u.Service); ok {
+			key, lockstep = "group:"+g, true
+		}
+		b := byKey[key]
+		if b == nil {
+			name := u.Project
+			if lockstep {
+				name = strings.TrimPrefix(key, "group:")
+			}
+			b = &batch{key: name, lockstep: lockstep}
+			byKey[key] = b
+			order = append(order, b)
+		}
+		b.ups = append(b.ups, u)
+	}
+	return order
+}
+
 // handleUpdateAll applies every pending update (local runs the engine; remote is enqueued to its
 // agent) in the background, then returns to the dashboard where the Activity tray shows progress.
+// Batches run concurrently up to the configured limit; the updates inside one run in sequence.
 func (s *Server) handleUpdateAll(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		ctx := context.Background()
@@ -757,26 +866,98 @@ func (s *Server) handleUpdateAll(w http.ResponseWriter, r *http.Request) {
 		}
 		sem := make(chan struct{}, conc)
 		var wg sync.WaitGroup
-		for _, u := range s.pendingUpdates(ctx) {
-			if !u.Local {
-				s.enqueue(u.Host, u.File, u.Service, u.To) // remote: agent runs it sequentially
-				continue
-			}
-			p, ok := s.project(strconv.Itoa(u.PID))
-			if !ok {
-				continue
-			}
+		for _, b := range s.batches(s.pendingUpdates(ctx)) {
 			wg.Add(1)
 			sem <- struct{}{}
-			go func(p Project, svc, to string) {
+			go func(b *batch) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				s.applyUpdate(ctx, p, svc, to)
-			}(p, u.Service, u.To)
+				s.runBatch(ctx, b)
+			}(b)
 		}
 		wg.Wait()
 	}()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// runBatch applies one batch in order, stopping at the first failure. Everything after the failure is
+// recorded as skipped so the History tab explains why those services did not move, rather than
+// leaving them silently untouched.
+func (s *Server) runBatch(ctx context.Context, b *batch) {
+	var applied []pendingUpd // succeeded so far, for lockstep unwinding
+	for i, u := range b.ups {
+		if !u.Local {
+			// Remote work is handed to the agent, which runs it sequentially but reports back
+			// asynchronously — the server cannot yet await a remote result mid-batch, so a remote
+			// failure does not stop the rest of its batch.
+			s.enqueue(u.Host, u.File, u.Service, u.To)
+			continue
+		}
+		p, ok := s.project(strconv.Itoa(u.PID))
+		if !ok {
+			continue
+		}
+		res, _ := s.applyUpdate(ctx, p, u.Service, u.To)
+		if res.Outcome == engine.OutcomeUpdated {
+			applied = append(applied, u)
+			continue
+		}
+		if res.Outcome == engine.OutcomeSkipped {
+			continue
+		}
+
+		// Failed: abandon the rest of the batch.
+		for _, rest := range b.ups[i+1:] {
+			s.recordSkipped(rest, fmt.Sprintf("skipped: %s failed earlier in %q", u.Service, b.key))
+		}
+		if b.lockstep {
+			s.unwindBatch(ctx, applied, u.Service, b.key)
+		}
+		return
+	}
+}
+
+// recordSkipped notes an update that was never attempted because an earlier one in its batch failed.
+func (s *Server) recordSkipped(u pendingUpd, reason string) {
+	s.store.Add(store.Record{
+		Project: u.Project, Service: u.Service, From: u.From, To: u.To,
+		Outcome: string(engine.OutcomeSkipped), Err: reason,
+	})
+}
+
+// unwindBatch reverts the members of a lockstep group that already succeeded, so the group is left
+// wholly on the old version rather than split across two. A revert that itself fails is recorded as
+// an error: that is a state only the user can untangle.
+func (s *Server) unwindBatch(ctx context.Context, applied []pendingUpd, failedSvc, group string) {
+	for i := len(applied) - 1; i >= 0; i-- { // reverse order, mirroring how they were applied
+		u := applied[i]
+		// Retention may be off, in which case the snapshot was discarded the moment the update
+		// succeeded and there is nothing to revert to — say so rather than fail silently.
+		pt, found := s.store.TakeRollback(u.Project, u.Service)
+		if !found {
+			s.recordSkipped(u, fmt.Sprintf(
+				"lockstep group %q broke on %s, but no rollback point remained for %s — it is STILL on %s",
+				group, failedSvc, u.Service, u.To))
+			continue
+		}
+		req := engine.Request{Project: pt.File, Service: u.Service, FromImage: pt.FromImage, ToImage: pt.ToImage}
+		res := s.eng.ManualRollback(ctx, req, pt.Snapshot)
+
+		outcome, note := "reverted", fmt.Sprintf("lockstep group %q broke on %s", group, failedSvc)
+		if res.Outcome == engine.OutcomeError {
+			outcome = string(engine.OutcomeError) // needs a human — let it light the Failed badge
+			if res.Err != nil {
+				note += ": " + res.Err.Error()
+			}
+		} else {
+			_ = compose.CommitIfRepo(pt.File, fmt.Sprintf("belay: lockstep revert %s %s -> %s", u.Service, pt.ToImage, pt.FromImage))
+		}
+		s.store.Add(store.Record{
+			Project: u.Project, Service: u.Service, From: pt.ToImage, To: pt.FromImage,
+			Outcome: outcome, Duration: res.Duration.Round(time.Millisecond).String(),
+			Err:     note, Logs: strings.TrimSpace(res.Logs),
+		})
+	}
 }
 
 // applyUpdate runs the safe-update engine for one service, commits on success, records the attempt,
@@ -786,13 +967,26 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 	if err != nil {
 		return engine.Result{Outcome: engine.OutcomeError, Err: err}, ""
 	}
+	// Deploying the ref that is already in the compose file means the tag itself moved: a rebase.
+	rebase := target == current
+
+	// A rebase keeps the tag, so "revert to the previous image" cannot be expressed as a tag — the tag
+	// now points at the build we are trying to escape. Capture the digest we are currently running and
+	// roll back to that instead, which also stops the bad build being pulled straight back in.
+	from := current
+	if rebase {
+		if dig, err := agent.ImageDigest(ctx, current); err == nil && dig != "" {
+			ref := registry.ParseRef(current)
+			from = strings.TrimSuffix(current, ":"+ref.Tag) + "@" + dig
+		}
+	}
 
 	job := s.jobs.start(p.Name, service, current, target)
 	logCtx, stopLogs := context.WithCancel(ctx)
 	go s.streamLogs(logCtx, p.File, service, job) // live progress in the Activity tray
 
 	res := s.eng.SafeUpdate(ctx, engine.Request{
-		Project: p.File, Service: service, FromImage: current, ToImage: target,
+		Project: p.File, Service: service, FromImage: from, ToImage: target, Rebase: rebase,
 		OnPhase: func(ph string) { s.jobs.setPhase(job, ph) },
 	})
 	stopLogs()
@@ -804,6 +998,11 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 	errStr := ""
 	if res.Err != nil {
 		errStr = res.Err.Error()
+	}
+	if res.Outcome == engine.OutcomeRolledBack || res.Outcome == engine.OutcomeError {
+		if caveat := rollbackCaveat(p.File, service); caveat != "" {
+			errStr = strings.TrimSpace(errStr + "\n" + caveat)
+		}
 	}
 	s.jobs.finish(job, string(res.Outcome), strings.TrimSpace(res.Logs))
 	s.store.Add(store.Record{
@@ -821,6 +1020,48 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 		s.notify.Success(p.Name, service, current, target)
 	}
 	return res, current
+}
+
+// statefulImages are image names that indicate a service holds persistent state a rollback cannot
+// reach. Matched as a substring of the image reference, so "postgres:16-alpine" and
+// "docker.io/library/mariadb" both hit.
+var statefulImages = []string{
+	"postgres", "postgis", "mysql", "mariadb", "mongo", "redis", "valkey",
+	"clickhouse", "cockroach", "elasticsearch", "opensearch", "influxdb", "timescale",
+}
+
+// rollbackCaveat warns when a rolled-back service shares its compose file with a datastore.
+//
+// Belay's rollback is image-tag plus volume snapshot, scoped to the service being updated. When the
+// new version writes to a database owned by a *sibling* service before failing its health gate —
+// schema migrations are the classic case — reverting the tag restores the code but not the data, and
+// nothing in the snapshot machinery covers a volume belay never took. The rollback genuinely
+// succeeded, so saying nothing would imply a clean recovery that did not happen.
+func rollbackCaveat(file, service string) string {
+	svcs, err := compose.Services(file)
+	if err != nil {
+		return ""
+	}
+	var found []string
+	for _, sv := range svcs {
+		if sv.Name == service {
+			continue
+		}
+		img := strings.ToLower(sv.Image)
+		for _, db := range statefulImages {
+			if strings.Contains(img, db) {
+				found = append(found, sv.Name)
+				break
+			}
+		}
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("NOTE: the image tag was reverted, but this stack also runs %s. "+
+		"Belay's rollback does not cover state owned by another service, so anything the failed "+
+		"version wrote there (schema migrations especially) is still in place and may need "+
+		"attention before retrying.", strings.Join(found, ", "))
 }
 
 // retainRollback keeps a successful update's snapshot + old image as the service's single rollback

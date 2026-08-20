@@ -33,6 +33,7 @@ type probeRow struct {
 	Type    string
 	Target  string
 	Expect  int
+	Group   string // lockstep group this service belongs to ("" = none)
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -46,10 +47,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, sv := range services {
 			pr := cur.Probes[config.Key(p.File, sv.Name)]
+			grp, _ := cur.GroupFor(p.File, sv.Name)
 			rows = append(rows, probeRow{
 				Idx: i, PID: p.ID, Project: p.Name, Service: sv.Name, Image: sv.Image,
 				Pinned: cur.Pins[config.Key(p.File, sv.Name)],
 				Type:   pr.Type, Target: pr.Target, Expect: pr.Expect,
+				Group:  grp,
 			})
 			i++
 		}
@@ -80,6 +83,32 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if r.FormValue("section") == "probes" {
 		n, _ := strconv.Atoi(r.FormValue("n"))
 		_ = s.set.Update(func(st *config.Settings) {
+			// The form posts every service, so groups are rebuilt wholesale: clearing a service's
+			// group box is how a member is removed, and a group left with one member is dropped
+			// (a lockstep group of one is just a normal update).
+			members := map[string][]string{}
+			var groupOrder []string
+			for i := 0; i < n; i++ {
+				pid, _ := strconv.Atoi(r.FormValue(fmt.Sprintf("pid_%d", i)))
+				svc := r.FormValue(fmt.Sprintf("svc_%d", i))
+				file := s.fileByID(pid)
+				name := strings.TrimSpace(r.FormValue(fmt.Sprintf("pgroup_%d", i)))
+				if file == "" || svc == "" || name == "" {
+					continue
+				}
+				if _, seen := members[name]; !seen {
+					groupOrder = append(groupOrder, name)
+				}
+				members[name] = append(members[name], config.Key(file, svc))
+			}
+			st.Groups = st.Groups[:0]
+			for _, name := range groupOrder {
+				if len(members[name]) < 2 {
+					continue
+				}
+				st.Groups = append(st.Groups, config.ServiceGroup{Name: name, Members: members[name]})
+			}
+
 			for i := 0; i < n; i++ {
 				pid, _ := strconv.Atoi(r.FormValue(fmt.Sprintf("pid_%d", i)))
 				svc := r.FormValue(fmt.Sprintf("svc_%d", i))

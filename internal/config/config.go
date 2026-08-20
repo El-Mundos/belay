@@ -39,6 +39,15 @@ type Probe struct {
 	Expect int    `json:"expect"` // expected HTTP status for http probes (0 => any 2xx/3xx)
 }
 
+// ServiceGroup names a set of services that must move together. Authentik is the canonical example:
+// its worker applies the database migrations that its server then has to be able to interpret, so a
+// version split between the two breaks the deployment even though both containers report healthy.
+// Members are config.Key(project, service) values, and may span compose files.
+type ServiceGroup struct {
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
+}
+
 // Settings is the whole persisted config document.
 type Settings struct {
 	RollbackWindowHours int              `json:"rollback_window_hours"` // 0 = retention off
@@ -53,6 +62,23 @@ type Settings struct {
 	Registries          []Registry       `json:"registries"` // private-registry credentials for checks + pulls
 	Pins                map[string]bool  `json:"pins"`       // key = project\x00service → ignored for updates
 	Probes              map[string]Probe `json:"probes"`     // key = project\x00service
+	Groups              []ServiceGroup   `json:"groups"`     // services that must move together
+}
+
+// GroupFor returns the name of the service group a service belongs to, if any.
+func (s Settings) GroupFor(project, service string) (string, bool) {
+	k := Key(project, service)
+	for _, g := range s.Groups {
+		if g.Name == "" {
+			continue
+		}
+		for _, m := range g.Members {
+			if m == k {
+				return g.Name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // canonicalRegistry normalizes a registry host for matching, collapsing Docker Hub's several spellings

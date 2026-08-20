@@ -74,12 +74,17 @@
 <form method="post" action="/settings" class="card">
   <input type="hidden" name="section" value="probes">
   <input type="hidden" name="n" value="{{.N}}">
-  <h3>Health probes</h3>
+  <h3>Health probes &amp; groups</h3>
   <p class="muted small">An extra "is it really up?" check for services with no Docker <code>HEALTHCHECK</code>
   (e.g. wg-easy). If set, an update only counts as healthy once this endpoint responds — otherwise it
   auto-rolls-back. The target must be reachable from the Belay container.</p>
+  <p class="muted small"><b>Group</b> ties services that must run the same version together (Authentik's
+  <code>server</code> + <code>worker</code> are the classic pair). Give each member the same group name.
+  If one fails, the rest are skipped <b>and</b> any that already updated are reverted, so the group is
+  never left split across two versions. Services in one compose file already stop each other on
+  failure; a group adds the revert, and can span files. A group needs at least two members.</p>
   <table class="probes">
-    <thead><tr><th>service</th><th>type</th><th>target</th><th>expect</th></tr></thead>
+    <thead><tr><th>service</th><th>type</th><th>target</th><th>expect</th><th>group</th></tr></thead>
     <tbody>
     {{range .Services}}
       <tr>
@@ -93,6 +98,7 @@
         </select></td>
         <td><input type="text" name="ptarget_{{.Idx}}" value="{{.Target}}" placeholder="http://svc:port/  or  host:port"></td>
         <td><input type="number" class="num" name="pexpect_{{.Idx}}" value="{{.Expect}}" placeholder="200"></td>
+        <td><input type="text" name="pgroup_{{.Idx}}" value="{{.Group}}" placeholder="e.g. authentik"></td>
       </tr>
     {{end}}
     </tbody>
