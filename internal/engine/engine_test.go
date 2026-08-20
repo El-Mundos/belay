@@ -166,3 +166,43 @@ func TestSafeUpdate_SameImageSkips(t *testing.T) {
 		t.Fatalf("outcome = %q, want skipped", res.Outcome)
 	}
 }
+
+// A rebase deploys the same ref it is already on — the tag was re-pointed at a new build. The engine
+// must treat that as real work rather than the no-op it looks like, or rolling tags can never move.
+func TestSafeUpdate_RebaseIsNotSkipped(t *testing.T) {
+	d := &fakeDeployer{current: "app:15"}
+	e := &Engine{Deployer: d, Health: fakeGate{healthy: true}}
+
+	r := Request{Project: "p", Service: "s", FromImage: "app:15", ToImage: "app:15"}
+	if res := e.SafeUpdate(context.Background(), r); res.Outcome != OutcomeSkipped {
+		t.Fatalf("without Rebase, equal refs should skip; got %q", res.Outcome)
+	}
+
+	r.Rebase = true
+	res := e.SafeUpdate(context.Background(), r)
+	if res.Outcome != OutcomeUpdated {
+		t.Fatalf("outcome = %q, want updated", res.Outcome)
+	}
+	if len(d.history) != 1 || d.history[0] != "app:15" {
+		t.Errorf("history = %v, want one deploy of app:15", d.history)
+	}
+}
+
+// A failed rebase cannot roll back "to the previous tag" — the tag now means the broken build. The
+// caller pins FromImage to the digest that was running, and the engine must restore exactly that.
+func TestSafeUpdate_RebaseRollsBackToPinnedDigest(t *testing.T) {
+	const old = "app@sha256:oldbuild"
+	d := &fakeDeployer{current: "app:15", logs: "panic: bad build"}
+	e := &Engine{Deployer: d, Health: fakeGate{healthy: false}}
+
+	res := e.SafeUpdate(context.Background(), Request{
+		Project: "p", Service: "s", FromImage: old, ToImage: "app:15", Rebase: true,
+	})
+	if res.Outcome != OutcomeRolledBack {
+		t.Fatalf("outcome = %q, want rolled_back", res.Outcome)
+	}
+	if d.current != old {
+		t.Errorf("running image = %q, want the pinned digest %q — reverting to the tag would "+
+			"re-pull the build that just failed", d.current, old)
+	}
+}

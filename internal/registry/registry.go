@@ -136,6 +136,13 @@ func (c *Client) Tags(ctx context.Context, ref Ref) ([]string, error) {
 
 // Newer returns the stable tags strictly newer than ref.Tag, of the same version shape, ascending.
 // comparable is false when ref.Tag itself isn't a clean semver-ish tag (e.g. "16-alpine", "latest").
+//
+// Shape is deliberately strict: a service pinned to "15" is only ever offered "16", never "15.4.0".
+// Rewriting it to "15.4.0" would silently convert a rolling tag the user chose into a frozen one and
+// take away the auto-tracking that was the point of pinning "15". Movement *within* a rolling tag is
+// not a version change at all — it is the same tag pointing at a new build — and is detected by
+// comparing digests instead (see Digest), which also covers tags no version scheme can order at all,
+// like "latest" or "stable".
 func (c *Client) Newer(ctx context.Context, ref Ref) (newer []string, comparable bool, err error) {
 	cur, ok := parseVer(ref.Tag)
 	if !ok {
@@ -152,7 +159,7 @@ func (c *Client) Newer(ctx context.Context, ref Ref) (newer []string, comparable
 	var list []tv
 	for _, t := range tags {
 		v, ok := parseVer(t)
-		if !ok || len(v) != len(cur) { // same shape only (X.Y.Z vs X.Y.Z)
+		if !ok || len(v) != len(cur) { // same shape only (X.Y.Z vs X.Y.Z) — see the doc comment
 			continue
 		}
 		if cmpVer(v, cur) > 0 {
@@ -164,6 +171,45 @@ func (c *Client) Newer(ctx context.Context, ref Ref) (newer []string, comparable
 		newer = append(newer, x.tag)
 	}
 	return newer, true, nil
+}
+
+// Digest returns the registry's current manifest digest for ref's exact tag — what a `docker pull`
+// of that tag would fetch right now. Comparing it against the digest actually running locally is how
+// Belay tracks tags that carry no version information of their own ("latest", "stable") and tags
+// that are re-pointed in place ("15" moving from 15.0.0 to 15.4.0). No pull is involved.
+func (c *Client) Digest(ctx context.Context, ref Ref) (string, error) {
+	const accept = "application/vnd.oci.image.index.v1+json," +
+		"application/vnd.docker.distribution.manifest.list.v2+json," +
+		"application/vnd.oci.image.manifest.v1+json," +
+		"application/vnd.docker.distribution.manifest.v2+json"
+	auth := ""
+	url := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", c.Scheme, ref.Registry, ref.Repository, ref.Tag)
+	for {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+		req.Header.Set("Accept", accept)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			return "", err
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusUnauthorized && auth == "" {
+			if auth, err = c.authFor(ctx, ref, resp.Header.Get("WWW-Authenticate")); err != nil {
+				return "", err
+			}
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("%s manifest %s: %s", ref.Repository, ref.Tag, resp.Status)
+		}
+		d := resp.Header.Get("Docker-Content-Digest")
+		if d == "" {
+			return "", fmt.Errorf("%s manifest %s: registry returned no digest", ref.Repository, ref.Tag)
+		}
+		return d, nil
+	}
 }
 
 func (c *Client) token(ctx context.Context, ref Ref, ch map[string]string) (string, error) {

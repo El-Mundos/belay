@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strconv"
+	"strings"
 
 	"github.com/El-Mundos/belay/internal/compose"
 	"github.com/El-Mundos/belay/internal/engine"
@@ -28,12 +29,36 @@ func (l Local) SetImage(_ context.Context, r engine.Request, image string) error
 }
 
 // Up recreates the single service with its current compose definition.
+//
+// The pull policy is "missing" normally — the tag was just rewritten, so the image is either present
+// or fetched once. A rebase keeps the same tag, so nothing looks missing and Docker would happily
+// reuse the stale local image; those runs must pull unconditionally or the update is a no-op.
 func (l Local) Up(ctx context.Context, r engine.Request) error {
 	f, err := l.file(r)
 	if err != nil {
 		return err
 	}
-	return run(ctx, "docker", "compose", "-f", f, "up", "-d", "--pull", "missing", r.Service)
+	pull := "missing"
+	if r.Rebase {
+		pull = "always"
+	}
+	return run(ctx, "docker", "compose", "-f", f, "up", "-d", "--pull", pull, r.Service)
+}
+
+// ImageDigest returns the repository digest of the image currently present locally for a reference,
+// i.e. what was actually pulled. Empty (with no error) when the image has no repo digest — a locally
+// built image that was never pulled from a registry, which simply cannot be digest-tracked.
+func ImageDigest(ctx context.Context, image string) (string, error) {
+	out, err := output(ctx, "docker", "image", "inspect", image, "--format", "{{join .RepoDigests \"\\n\"}}")
+	if err != nil {
+		return "", fmt.Errorf("inspect %s: %w: %s", image, err, strings.TrimSpace(out))
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if _, dig, ok := strings.Cut(strings.TrimSpace(line), "@"); ok {
+			return dig, nil
+		}
+	}
+	return "", nil
 }
 
 // Logs returns the last `tail` lines of the service's container logs.

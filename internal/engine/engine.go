@@ -29,6 +29,7 @@ type Request struct {
 	Service   string             // compose service name
 	FromImage string             // current image ref, e.g. "grafana/grafana-oss:13.0.2"
 	ToImage   string             // target image ref, e.g. "grafana/grafana-oss:13.1.0"
+	Rebase    bool               // same tag, new build behind it: force a pull instead of a tag rewrite
 	OnPhase   func(phase string) // optional: reports the current stage (snapshotting/pulling/health…)
 }
 
@@ -93,7 +94,8 @@ func (e *Engine) SafeUpdate(ctx context.Context, r Request) Result {
 		return res
 	}
 
-	if r.FromImage == r.ToImage || r.ToImage == "" {
+	// A rebase deliberately keeps the same tag, so equal refs are real work there, not a no-op.
+	if r.ToImage == "" || (r.FromImage == r.ToImage && !r.Rebase) {
 		return finish(OutcomeSkipped, nil)
 	}
 

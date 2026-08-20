@@ -99,3 +99,52 @@ func TestNewer(t *testing.T) {
 		t.Error("16-alpine should be reported not-comparable")
 	}
 }
+
+// TestNewer_RollingTagStaysPut covers the real wg-easy layout: pinned to "15" while the registry also
+// publishes "15.4.0". Newer must offer nothing — rewriting the compose to "15.4.0" would convert the
+// rolling tag the user chose into a frozen one. Movement inside "15" is a digest change, not a
+// version change, and is Digest's job.
+func TestNewer_RollingTagStaysPut(t *testing.T) {
+	tags := []string{"13", "14", "15", "15.0", "15.0.0", "15.4", "15.4.0", "latest"}
+	c, ref := mockRegistry(t, "wg-easy/wg-easy", tags)
+	ref.Tag = "15"
+
+	newer, ok, err := c.Newer(context.Background(), ref)
+	if err != nil || !ok {
+		t.Fatalf("Newer err=%v comparable=%v", err, ok)
+	}
+	if len(newer) != 0 {
+		t.Errorf("Newer = %v, want none (a rolling tag must not be rewritten to a precise one)", newer)
+	}
+
+	// ...but a genuine next major, at the same precision, is still offered.
+	c2, ref2 := mockRegistry(t, "wg-easy/wg-easy", append(tags, "16"))
+	ref2.Tag = "15"
+	newer, _, _ = c2.Newer(context.Background(), ref2)
+	if want := []string{"16"}; !reflect.DeepEqual(newer, want) {
+		t.Errorf("Newer = %v, want %v", newer, want)
+	}
+}
+
+func TestDigest(t *testing.T) {
+	const want = "sha256:c0ffee"
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	mux.HandleFunc("/v2/library/nginx/manifests/latest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Errorf("Digest should not download the manifest body, got %s", r.Method)
+		}
+		w.Header().Set("Docker-Content-Digest", want)
+	})
+	c := &Client{HTTP: srv.Client(), Scheme: "http"}
+	ref := Ref{Registry: strings.TrimPrefix(srv.URL, "http://"), Repository: "library/nginx", Tag: "latest"}
+
+	got, err := c.Digest(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("Digest = %q, want %q", got, want)
+	}
+}
