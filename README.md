@@ -47,14 +47,17 @@ needing a new env var) revert the tag and tell you to fix the config and retry �
 Container tags move in two different ways, and only tracking one of them leaves services silently
 stuck, so Belay watches both:
 
-- **The tag name changes** — `1.27.1` → `1.27.2`. Compared by version, offered as a normal update,
-  and the compose file is rewritten. Only tags of the same shape are compared, so a service pinned
-  to `15` is offered `16` and never `15.4.0`: rewriting it would quietly turn the rolling tag you
-  chose into a frozen one.
-- **The tag stays, the build behind it changes** — `15` re-pointed from 15.0.0 to 15.4.0, or any
-  `latest` / `stable`. There is no new name to notice, so Belay compares the registry's digest for
-  the tag against the digest you actually pulled. Applying it re-pulls the same tag and leaves your
-  compose file untouched.
+- **The tag name changes** — `1.27.1` → `1.27.2`. Compared by version and applied by rewriting the
+  tag in your compose file. Tags are ordered purely by version, ignoring how many components they
+  have, so a service climbs to whatever is genuinely newest: `15` → `15.4.0` → `16` → `16.2.0`.
+  Where a registry spells one release several ways (`15.4` and `15.4.0`), the most precise wins —
+  the vaguer form would drift to a different build later. A registry mixing schemes (a calver
+  `20260819` next to a semver `1.2.3`) will rank the calver higher, because numerically it is; pin
+  the service if that isn't what you want.
+- **The tag stays, the build behind it changes** — a `latest` / `stable`, or a rebuild published
+  under a tag you already run. There is no new name to notice, so Belay compares the registry's
+  digest for the tag against the digest you actually pulled. Applying it re-pulls the same tag and
+  leaves your compose file untouched. This is the only signal for tags no version scheme can order.
 
 Because a rebase keeps the tag, "roll back to the old tag" would mean pulling the build that just
 failed. Belay instead pins the rollback to the digest that was running, so a failed rebase leaves the

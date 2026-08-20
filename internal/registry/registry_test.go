@@ -88,8 +88,9 @@ func TestNewer(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Newer err=%v comparable=%v", err, ok)
 	}
-	// same-shape, strictly newer, ascending — "2" and "-alpine" excluded, older excluded
-	want := []string{"1.27.2", "1.28.0"}
+	// strictly newer, ascending, any shape — the bare major "2" is a real newer release and is
+	// included; "-alpine" is a variant and "latest" carries no version, so both are excluded.
+	want := []string{"1.27.2", "1.28.0", "2"}
 	if !reflect.DeepEqual(newer, want) {
 		t.Errorf("Newer = %v, want %v", newer, want)
 	}
@@ -100,29 +101,49 @@ func TestNewer(t *testing.T) {
 	}
 }
 
-// TestNewer_RollingTagStaysPut covers the real wg-easy layout: pinned to "15" while the registry also
-// publishes "15.4.0". Newer must offer nothing — rewriting the compose to "15.4.0" would convert the
-// rolling tag the user chose into a frozen one. Movement inside "15" is a digest change, not a
-// version change, and is Digest's job.
-func TestNewer_RollingTagStaysPut(t *testing.T) {
-	tags := []string{"13", "14", "15", "15.0", "15.0.0", "15.4", "15.4.0", "latest"}
-	c, ref := mockRegistry(t, "wg-easy/wg-easy", tags)
-	ref.Tag = "15"
-
-	newer, ok, err := c.Newer(context.Background(), ref)
-	if err != nil || !ok {
-		t.Fatalf("Newer err=%v comparable=%v", err, ok)
+// TestNewer_ClimbsAcrossTagShapes walks the real wg-easy layout the whole way: a service pinned to
+// "15" must reach 15.4.0, then 16, then 16.2.0 as those ship — regardless of how many components
+// each tag has. Comparing only same-length tags stranded it on "15" indefinitely.
+func TestNewer_ClimbsAcrossTagShapes(t *testing.T) {
+	tags := []string{
+		"13", "14", "15", "15.0", "15.0.0", "15.4", "15.4.0",
+		"16", "16.2.0", "15.4.0-beta.1", "latest",
 	}
-	if len(newer) != 0 {
-		t.Errorf("Newer = %v, want none (a rolling tag must not be rewritten to a precise one)", newer)
+	for _, tc := range []struct {
+		from string
+		want []string
+	}{
+		// From "15": 15.0/15.0.0 equal it so are not newer; 15.4 and 15.4.0 are one release and
+		// collapse to the precise spelling; then the majors.
+		{"15", []string{"15.4.0", "16", "16.2.0"}},
+		{"15.4.0", []string{"16", "16.2.0"}},
+		{"16", []string{"16.2.0"}},
+		{"16.2.0", nil},
+	} {
+		c, ref := mockRegistry(t, "wg-easy/wg-easy", tags)
+		ref.Tag = tc.from
+		newer, ok, err := c.Newer(context.Background(), ref)
+		if err != nil || !ok {
+			t.Fatalf("from %s: Newer err=%v comparable=%v", tc.from, err, ok)
+		}
+		if !reflect.DeepEqual(newer, tc.want) {
+			t.Errorf("from %s: Newer = %v, want %v", tc.from, newer, tc.want)
+		}
 	}
+}
 
-	// ...but a genuine next major, at the same precision, is still offered.
-	c2, ref2 := mockRegistry(t, "wg-easy/wg-easy", append(tags, "16"))
-	ref2.Tag = "15"
-	newer, _, _ = c2.Newer(context.Background(), ref2)
-	if want := []string{"16"}; !reflect.DeepEqual(newer, want) {
-		t.Errorf("Newer = %v, want %v", newer, want)
+// Equal versions spelled at different precision are one release, and the precise spelling is the one
+// to move to — the vaguer one would silently drift to a different build later.
+func TestNewer_CollapsesEquivalentTags(t *testing.T) {
+	c, ref := mockRegistry(t, "library/nginx", []string{"1.27.1", "1.28", "1.28.0"})
+	ref.Tag = "1.27.1"
+
+	newer, _, err := c.Newer(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"1.28.0"}; !reflect.DeepEqual(newer, want) {
+		t.Errorf("Newer = %v, want %v (1.28 and 1.28.0 are the same release)", newer, want)
 	}
 }
 

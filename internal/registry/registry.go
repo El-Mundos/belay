@@ -134,15 +134,22 @@ func (c *Client) Tags(ctx context.Context, ref Ref) ([]string, error) {
 	return all, nil
 }
 
-// Newer returns the stable tags strictly newer than ref.Tag, of the same version shape, ascending.
-// comparable is false when ref.Tag itself isn't a clean semver-ish tag (e.g. "16-alpine", "latest").
+// Newer returns the stable tags strictly newer than ref.Tag, ascending. comparable is false when
+// ref.Tag itself isn't a clean semver-ish tag (e.g. "16-alpine", "latest").
 //
-// Shape is deliberately strict: a service pinned to "15" is only ever offered "16", never "15.4.0".
-// Rewriting it to "15.4.0" would silently convert a rolling tag the user chose into a frozen one and
-// take away the auto-tracking that was the point of pinning "15". Movement *within* a rolling tag is
-// not a version change at all — it is the same tag pointing at a new build — and is detected by
-// comparing digests instead (see Digest), which also covers tags no version scheme can order at all,
-// like "latest" or "stable".
+// Tags are ordered purely by version, with no regard to how many components they have, so a service
+// climbs to whatever is genuinely newest: 15 → 15.4.0 → 16 → 16.2.0. Comparing only same-length tags
+// stranded anything pinned to a short tag, since nothing one-component beats "15" until a "16"
+// ships. Precision therefore moves in both directions by design — that is what "newest" means when a
+// registry publishes 15, 15.4 and 15.4.0 side by side.
+//
+// Two consequences worth knowing. Tags that denote the same version collapse to the most precise, so
+// "15.4" and "15.4.0" appear once, as "15.4.0" — the vaguer form would drift underneath us later.
+// And a registry mixing versioning schemes (a calver "20260819" alongside a semver "1.2.3") will
+// order the calver higher, because numerically it is; pin such a service if that is unwanted.
+//
+// Movement *within* one tag ("15" re-pointed to a new build, or any "latest") has no new name to
+// compare and is caught by Digest instead.
 func (c *Client) Newer(ctx context.Context, ref Ref) (newer []string, comparable bool, err error) {
 	cur, ok := parseVer(ref.Tag)
 	if !ok {
@@ -159,15 +166,24 @@ func (c *Client) Newer(ctx context.Context, ref Ref) (newer []string, comparable
 	var list []tv
 	for _, t := range tags {
 		v, ok := parseVer(t)
-		if !ok || len(v) != len(cur) { // same shape only (X.Y.Z vs X.Y.Z) — see the doc comment
+		if !ok { // variant / pre-release / non-numeric ("16-alpine", "v3-rc.1", "latest")
 			continue
 		}
 		if cmpVer(v, cur) > 0 {
 			list = append(list, tv{t, v})
 		}
 	}
-	sort.Slice(list, func(i, j int) bool { return cmpVer(list[i].v, list[j].v) < 0 })
-	for _, x := range list {
+	// Ascending by version; equal versions put the more precise tag last so it wins the collapse below.
+	sort.Slice(list, func(i, j int) bool {
+		if c := cmpVer(list[i].v, list[j].v); c != 0 {
+			return c < 0
+		}
+		return len(list[i].v) < len(list[j].v)
+	})
+	for i, x := range list {
+		if i+1 < len(list) && cmpVer(x.v, list[i+1].v) == 0 {
+			continue // same version, less precise spelling — keep only the most precise
+		}
 		newer = append(newer, x.tag)
 	}
 	return newer, true, nil
