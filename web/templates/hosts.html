@@ -20,21 +20,20 @@
 <div class="host-cards" id="host-cards">
 {{range $i, $h := .Hosts}}
 <div class="card host-card{{if $h.Local}} host-local{{end}}">
-  <h3>{{$h.Host}}
+  <h3>
+    <span class="host-name">{{$h.Host}}</span>
     {{if $h.Local}}
       {{/* No online badge here: this host is serving the page you are reading it on. */}}
       <span class="chip chip-main">main host</span>
     {{else if $h.Online}}<span class="badge-ok">● online</span>
     {{else}}<span class="muted small">○ last seen {{$h.Ago}} ago</span>{{end}}
+    {{/* Version sits with the host's status, right-aligned so it lands in the same spot on every
+         card no matter how long the name is. */}}
+    <span class="host-ver" id="ver-{{$i}}">{{template "hostVersion" $h}}</span>
   </h3>
-  <p class="muted small">{{len $h.Projects}} stack(s)
-    {{if $h.Local}}
-      <span class="muted small">· serves this UI{{if $.AgentsEnabled}} and manages the agents{{end}} · v{{$h.Version}}</span>
-    {{else if $h.Stale}}
-      <span class="major-tag" title="This agent is not running the same version as the server. Newer commands may carry fields it ignores silently — update it.">v{{if $h.Version}}{{$h.Version}}{{else}}unknown{{end}}</span>
-    {{else}}
-      <span class="muted small">· agent · v{{$h.Version}}</span>
-    {{end}}
+  <p class="muted small host-meta">
+    {{len $h.Projects}} stack(s) ·
+    {{if $h.Local}}serves this UI{{if $.AgentsEnabled}} and manages the agents{{end}}{{else}}agent{{end}}
   </p>
   <div class="chips">{{range $h.Projects}}<span class="chip">{{.Name}}</span>{{end}}</div>
   {{$prot := protected $h}}

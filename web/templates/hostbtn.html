@@ -27,6 +27,14 @@ drift apart.
 {{end}}
 {{end}}
 
+{{define "hostVersion"}}
+{{if .Stale}}
+  <span class="ver ver-upd" title="{{if .Local}}A newer Belay image is available for this host{{else if .Version}}This agent is not running the same version as the server — newer commands may carry fields it ignores silently{{else}}This agent predates version reporting — update it{{end}}">v{{if .Version}}{{.Version}}{{else}}unknown{{end}}</span>
+{{else}}
+  <span class="ver ver-ok" title="{{if .Local}}Running the newest image Belay knows about{{else}}Matches the server's version{{end}}">v{{.Version}}</span>
+{{end}}
+{{end}}
+
 {{define "subanner"}}
 {{if .SelfUpdate}}
 <div class="selfupdate-banner">

@@ -7,6 +7,7 @@ same response. Telling someone to reload to see what you already know is not an 
 <span class="{{.Class}} small">{{.Msg}}</span>
 {{if .Refresh}}
 <div class="host-slot" id="pri-{{.Host.Idx}}" hx-swap-oob="true">{{template "hostPrimary" .Host}}</div>
+<span class="host-ver" id="ver-{{.Host.Idx}}" hx-swap-oob="true">{{template "hostVersion" .Host}}</span>
 <div id="su-banner" hx-swap-oob="true">{{template "subanner" .}}</div>
 {{end}}
 {{end}}

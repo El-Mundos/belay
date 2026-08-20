@@ -210,6 +210,18 @@ details.projgroup table { border:none; border-radius:0; }
 .host-card.host-local { border-color:color-mix(in srgb, var(--accent) 45%, var(--line)); }
 .chip-main { color:var(--accent); border-color:var(--accent);
   background:color-mix(in srgb, var(--accent) 12%, transparent); }
+/* A version is only worth colouring red when it is asking you to do something. Everything else is
+   just a fact about a healthy host, so it reads green. */
+.ver { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; font-weight:600;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap; }
+.ver-ok { color:var(--ok); border:1px solid var(--ok);
+  background:color-mix(in srgb, var(--ok) 13%, transparent); }
+.ver-upd { color:var(--err); border:1px solid var(--err);
+  background:color-mix(in srgb, var(--err) 16%, transparent); }
+.host-meta { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.host-card h3 { flex-wrap:wrap; }
+.host-card h3 .host-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.host-ver { margin-left:auto; flex:none; }
 .host-card h3 { margin:0 0 6px; font-size:14px; display:flex; align-items:center; gap:8px; }
 .chips { margin-top:6px; }
 /* Every host card is the same height and its buttons sit on the same line, whatever the card
