@@ -82,7 +82,38 @@ func Detect(ctx context.Context) *Manager {
 }
 
 func (m *Manager) Enabled() bool { return m != nil && m.container != "" }
-func (m *Manager) Image() string { return m.image }
+
+// Image is Belay's own image ref ("" when not running in a container). Nil-safe: Detect returns nil
+// outside a container, and callers hold that nil directly.
+func (m *Manager) Image() string {
+	if m == nil {
+		return ""
+	}
+	return m.image
+}
+
+// NewForTest builds a Manager with a known identity, for callers that need to exercise logic keyed
+// on Belay's own container/image/transport without a live Docker daemon to detect them from.
+func NewForTest(container, image, dockerHost string) *Manager {
+	return &Manager{container: container, image: image, dockerHost: dockerHost}
+}
+
+// Container is Belay's own container name ("" when not running in one).
+func (m *Manager) Container() string {
+	if m == nil {
+		return ""
+	}
+	return m.container
+}
+
+// DockerHost is the DOCKER_HOST Belay talks to ("" => the mounted socket). Its hostname names the
+// container Belay depends on for all Docker access — typically a socket-proxy.
+func (m *Manager) DockerHost() string {
+	if m == nil {
+		return ""
+	}
+	return m.dockerHost
+}
 
 // Available reports whether the image tag now resolves to a different image than the running one.
 // For registry images it first attempts a pull; a failed pull (e.g. a local-only tag) is ignored.

@@ -530,6 +530,13 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		pid, file, image = -1, q.Get("file"), q.Get("image")
 	}
 
+	if host == "" {
+		if why := s.protectedReason(service, image); why != "" {
+			s.render(w, "status", map[string]any{"Protected": why})
+			return
+		}
+	}
+
 	ref := registry.ParseRef(image)
 	newer, comparable, err := s.reg.Newer(r.Context(), ref)
 	view := map[string]any{
@@ -588,6 +595,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	service, target := r.FormValue("s"), r.FormValue("image")
+	if why := s.protectedReason(service, target); why != "" {
+		s.render(w, "result", map[string]any{"Service": service, "Err": why})
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout+30*time.Second)
 	defer cancel()
 	res, current := s.applyUpdate(ctx, p, service, target)
@@ -665,6 +676,11 @@ func (s *Server) pendingUpdates(ctx context.Context) []pendingUpd {
 	var out []pendingUpd
 	add := func(local bool, host, projName, file string, pid int, svcName, image string) {
 		if image == "" || !strings.Contains(image, ":") || s.set.Pinned(file, svcName) {
+			return
+		}
+		// Only local services can be Belay's own container or transport; an agent host's
+		// same-named service is a different machine's problem and updates fine.
+		if local && s.protectedReason(svcName, image) != "" {
 			return
 		}
 		up := s.checkService(ctx, image, local)
@@ -810,6 +826,41 @@ func (s *Server) handleReviewCheck(w http.ResponseWriter, r *http.Request) {
 		view["MajorOnly"] = majorAvail // a major bump exists but is excluded from update-all
 	}
 	s.render(w, "reviewstatus", view)
+}
+
+// protectedReason explains why a service must not be updated through the ordinary path, or "" when
+// it is a normal service.
+//
+// Two services in a Belay deployment cannot be recreated by the very Belay doing the recreating:
+//
+//   - Belay's own container. `docker compose up -d belay` kills the process mid-update, so the update
+//     never finishes and nothing rolls it back. Self-update exists precisely for this, handing off to
+//     a throwaway helper container that outlives Belay's death.
+//   - Whatever DOCKER_HOST points at. Reaching Docker to recreate the socket-proxy requires the
+//     socket-proxy, so the moment it stops, the operation loses the connection it was travelling
+//     over and cannot finish or revert. Belay saws off the branch it is sitting on.
+//
+// This was latent until digest tracking made `latest` updatable: a socket-proxy on `:latest` had
+// never been a candidate before, so the hazard had never been reachable.
+func (s *Server) protectedReason(service, image string) string {
+	if own := s.su.Container(); own != "" && service == own {
+		return "Belay itself — use the Self-update banner, which hands off to a helper container"
+	}
+	if img := s.su.Image(); img != "" && image == img {
+		return "Belay's own image — use the Self-update banner"
+	}
+	// DOCKER_HOST looks like "tcp://belay-sockproxy:2375"; the hostname is the container name.
+	if dh := s.su.DockerHost(); dh != "" {
+		h := dh
+		if i := strings.Index(h, "://"); i >= 0 {
+			h = h[i+3:]
+		}
+		h, _, _ = strings.Cut(h, ":")
+		if h != "" && service == h {
+			return "Belay reaches Docker through this service — recreating it would cut the connection mid-update"
+		}
+	}
+	return ""
 }
 
 // svcUpdate is what a single service has waiting for it: either a newer version tag, or a rebase —

@@ -1,5 +1,6 @@
 {{define "status"}}
-{{- if .Err}}<span class="err">error: {{.Err}}</span>
+{{- if .Protected}}<span class="muted" title="{{.Protected}}">🔒 not updatable here</span>
+{{- else if .Err}}<span class="err">error: {{.Err}}</span>
 {{- else if not .Comparable}}<span class="muted">non-semver tag — skipped</span>
 {{- else if not .Latest}}<span class="ok">✓ up to date</span>
 {{- else}}

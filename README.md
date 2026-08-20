@@ -66,6 +66,18 @@ service on the exact image it had before — and stops the bad build being pulle
 > Digest tracking inspects the local image, so it currently covers services on the Belay host.
 > Remote agents report their images but not yet their digests, so rebases there go unnoticed.
 
+### What Belay will not update
+
+Two services in a Belay deployment cannot be recreated by the Belay doing the recreating, so they are
+excluded from checks and updates automatically and shown as 🔒 in the dashboard:
+
+- **Belay's own container.** `docker compose up -d belay` kills the process mid-update, so nothing is
+  left to finish it or roll it back. That is what the **Self-update** banner is for: it hands off to a
+  throwaway helper container that outlives Belay's own death.
+- **Whatever `DOCKER_HOST` points at**, typically a socket-proxy. Recreating it requires talking to
+  Docker *through it*, so the moment it stops, the operation loses the connection it was travelling
+  over — it can neither finish nor revert.
+
 ### What the health gate cannot catch
 
 Being honest about the edges, because a safety tool that overstates its guarantees is worse than one
