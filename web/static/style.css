@@ -138,6 +138,12 @@ tr.pinned { opacity:.55; }
 .pincell { text-align:right; white-space:nowrap; }
 .pinned-on { color:var(--upd) !important; border-color:var(--upd) !important; }
 
+/* session lost: polling has stopped, and the page says so instead of pretending it is live */
+.session-lost { position:fixed; left:50%; transform:translateX(-50%); bottom:20px; z-index:60;
+  display:flex; align-items:center; gap:14px; padding:12px 18px; border-radius:10px;
+  background:var(--panel); border:1px solid var(--err); box-shadow:0 8px 30px rgba(0,0,0,.45);
+  font-size:13.5px; max-width:calc(100vw - 40px); }
+
 /* activity tray (browser-downloads style) */
 .tray-toggle { position:fixed; right:20px; bottom:20px; z-index:40; padding:9px 15px;
   border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:22px;

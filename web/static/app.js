@@ -187,11 +187,64 @@
     return el.contains(sel.getRangeAt(0).commonAncestorContainer);
   }
 
+  // A polled request answered by a DIFFERENT ORIGIN, or refused outright, means Belay's session is
+  // gone and the identity provider replied instead. Polling through that is how one forgotten tab
+  // becomes a redirect storm: every poll is a full SSO round trip, forever, each one minting login
+  // state in the browser until the cookie jar is too big to send and the IdP starts rejecting the
+  // request. So the poll stops at the first sign the session is dead, and says so.
+  var pollingStopped = false;
+  var pollFailures = 0;
+
+  function stopPolling(reason) {
+    if (pollingStopped) return;
+    pollingStopped = true;
+    const bar = document.createElement("div");
+    bar.className = "session-lost";
+    bar.innerHTML = '<span></span><button class="btn" data-reload>Reload</button>';
+    bar.querySelector("span").textContent = reason;
+    bar.querySelector("[data-reload]").onclick = function () { location.reload(); };
+    document.body.appendChild(bar);
+  }
+
   document.addEventListener("htmx:beforeRequest", function (e) {
     const t = e.detail.target;
     if (!isPolled(t)) return;
+    if (pollingStopped) { e.preventDefault(); return; }
     // A refresh mid-selection wipes the selection; a refresh behind a modal is invisible anyway.
-    if (document.querySelector(".modal-overlay") || selectionInside(t)) e.preventDefault();
+    if (document.querySelector(".modal-overlay") || selectionInside(t)) { e.preventDefault(); return; }
+    // The Activity tray is the most frequent poll by far. While it is closed there is nothing to
+    // repaint, so it drops to a heartbeat instead of running at its open-tray rate.
+    if (t.id === "activity-body" && trayHidden() && Date.now() - lastTrayPoll < 15000) {
+      e.preventDefault();
+      return;
+    }
+    if (t.id === "activity-body") lastTrayPoll = Date.now();
+  });
+
+  var lastTrayPoll = 0;
+  function trayHidden() {
+    const tray = document.getElementById("activity-tray");
+    return !tray || tray.classList.contains("hidden");
+  }
+
+  document.addEventListener("htmx:afterRequest", function (e) {
+    if (!isPolled(e.detail.target)) return;
+    const xhr = e.detail.xhr;
+    // status 0 = the response was blocked, which is what a cross-origin redirect to the IdP looks
+    // like from an XHR. 401/403 = still us, but no longer authorised.
+    const dead = !xhr || xhr.status === 0 || xhr.status === 401 || xhr.status === 403;
+    let offsite = false;
+    try {
+      offsite = !!(xhr && xhr.responseURL) && new URL(xhr.responseURL).origin !== location.origin;
+    } catch (_) { /* opaque response */ }
+    if (!dead && !offsite) { pollFailures = 0; return; }
+    // One blip is a blip; two in a row is a dead session. Requiring two avoids stopping on a
+    // single dropped request during a deploy.
+    if (++pollFailures >= 2) {
+      stopPolling(offsite
+        ? "Your session expired and Belay stopped refreshing. Reload to sign in again."
+        : "Belay lost its connection and stopped refreshing.");
+    }
   });
 
   var lastResponse = {};
