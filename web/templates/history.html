@@ -17,16 +17,20 @@
     <div class="rec-meta muted">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}} · {{.Duration}}</div>
   </div>
   <div class="rec-actions">
-    {{if .CanRollback}}
+    {{if .SelfRollback}}
+      <form method="post" action="/self-rollback" class="rec-action"
+            onsubmit="return belayConfirm('Roll Belay back to the image it ran before this update? Belay restarts on the previous image; if it fails to stay up, this update is put back.', this, 'Roll back')">
+        <button class="btn warn" title="{{.Expires}}">↩ Roll back</button>
+      </form>
+    {{else if .CanRollback}}
       <form method="post" action="/rollback" class="rec-action" data-ok-label="Roll back"
             hx-confirm="Roll {{.Service}} back to {{.FromRef}}? This restores the pre-update data snapshot too.">
         <input type="hidden" name="p" value="{{.PID}}">
         <input type="hidden" name="s" value="{{.Service}}">
         <button class="btn warn" title="{{.Expires}}">↩ Roll back</button>
       </form>
-    {{else if eq .Outcome "updated"}}
-      <button class="btn ghost rb-expired" disabled
-              title="{{if .Superseded}}Superseded by a newer update — rollback no longer available{{else}}Rollback window expired{{end}}">↩ Roll back</button>
+    {{else if .RollbackWhy}}
+      <button class="btn ghost rb-expired" disabled title="{{.RollbackWhy}}">↩ Roll back</button>
     {{else}}
       <span class="rec-slot"></span>
     {{end}}

@@ -140,7 +140,7 @@ func runSelfUpdate(args []string) {
 		return
 	}
 	fmt.Printf("recreating belay from %s …\n", m.Image())
-	if err := m.Apply(context.Background(), *dataDir); err != nil {
+	if err := m.Apply(context.Background(), *dataDir, version.Version, 24*time.Hour); err != nil {
 		fatal(err)
 	}
 	fmt.Println("helper launched; belay will be replaced momentarily.")

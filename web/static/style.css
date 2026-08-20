@@ -212,6 +212,9 @@ details.projgroup table { border:none; border-radius:0; }
   background:color-mix(in srgb, var(--accent) 12%, transparent); }
 .host-card h3 { margin:0 0 6px; font-size:14px; display:flex; align-items:center; gap:8px; }
 .chips { margin-top:6px; }
+.host-actions { margin-top:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.host-actions .btn { margin:0; }
+.host-prot { margin:8px 0 0; }
 
 .rb-expired { cursor: not-allowed !important; }
 

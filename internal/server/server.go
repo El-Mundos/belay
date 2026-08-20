@@ -221,6 +221,8 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /activity", s.guard(s.handleActivity))
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("POST /self-update", s.guard(s.handleSelfUpdate))
+	mux.HandleFunc("POST /self-update/check", s.guard(s.handleSelfUpdateCheck))
+	mux.HandleFunc("POST /self-rollback", s.guard(s.handleSelfRollback))
 	mux.HandleFunc("GET /hosts", s.guard(s.handleHosts))
 	mux.HandleFunc("POST /remote-update", s.guard(s.handleRemoteUpdate))
 	mux.HandleFunc("POST /agent-update", s.guard(s.handleAgentSelfUpdate))
@@ -458,17 +460,33 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	recs := s.store.Succeeded()
 	now := time.Now()
 	seen := map[string]bool{} // project+service already shown a newer row
+	selfRB := s.selfRollbackPoint()
 	rows := make([]recView, 0, len(recs))
 	for _, rec := range recs {
 		row := newRecView(rec)
 		k := rec.Project + "\x00" + rec.Service
-		if pt, ok := s.store.RollbackFor(rec.Project, rec.Service); ok && now.Before(pt.ExpiresAt) {
-			if !seen[k] && pt.ToImage == rec.To {
-				row.CanRollback = true
-				row.PID = s.pidByName(rec.Project)
-				row.Expires = "expires " + pt.ExpiresAt.Format("Jan 2, 15:04")
-			} else {
-				row.Superseded = true // a live point exists, but for a newer update
+		switch {
+		case row.IsSelfUpdate():
+			// Belay's own update is backed by a retained IMAGE, not a snapshot, and only the newest
+			// one can be undone -- there is exactly one previous image.
+			if selfRB != nil && !seen[k] && rec.Outcome == "updated" {
+				row.SelfRollback = true
+				row.Expires = "restores v" + selfRB.Version + " · expires " + selfRB.Until.Format("Jan 2, 15:04")
+			} else if rec.Outcome == "updated" {
+				row.RollbackWhy = "The previous Belay image is no longer retained for this update."
+			}
+		default:
+			if pt, ok := s.store.RollbackFor(rec.Project, rec.Service); ok && now.Before(pt.ExpiresAt) {
+				if !seen[k] && pt.ToImage == rec.To {
+					row.CanRollback = true
+					row.PID = s.pidByName(rec.Project)
+					row.Expires = "expires " + pt.ExpiresAt.Format("Jan 2, 15:04")
+				} else {
+					row.Superseded = true // a live point exists, but for a newer update
+					row.RollbackWhy = "Superseded by a newer update — rollback no longer available"
+				}
+			} else if rec.Outcome == "updated" {
+				row.RollbackWhy = "Rollback window expired"
 			}
 		}
 		seen[k] = true

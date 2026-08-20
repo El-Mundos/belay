@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The helper script is the only thing standing between an interrupted self-update and a host with
@@ -50,7 +51,7 @@ func script(t *testing.T) string {
 	if err := json.Unmarshal([]byte(sample), &docs); err != nil {
 		t.Fatal(err)
 	}
-	return recreateScript(docs[0], "belay-previous")
+	return recreateScript(docs[0], "belay-previous", docs[0].Config.Image, true)
 }
 
 // --- journal reconciliation -------------------------------------------------------------------
@@ -106,4 +107,58 @@ func TestSaveState_NoDirIsANoop(t *testing.T) {
 
 func writeRaw(dir, content string) error {
 	return os.WriteFile(journalPath(dir), []byte(content), 0o600)
+}
+
+// The bug that made the VPS agent's update silently do nothing: the "already done?" check ran
+// against the LOCAL copy of the tag. An agent never pulls on its own, so on a moving tag like
+// :latest it compared yesterday's image with itself, concluded the work was done, and exited 0.
+func TestRecreateScript_PullsBeforeDecidingItIsAlreadyDone(t *testing.T) {
+	s := script(t)
+	pull := strings.Index(s, "docker pull")
+	check := strings.Index(s, `if [ "$target" = "$current" ]`)
+	if pull < 0 || check < 0 {
+		t.Fatalf("script missing pull or check:\n%s", s)
+	}
+	if pull > check {
+		t.Error("the image is pulled AFTER the up-to-date check, so a stale local tag reads as done")
+	}
+}
+
+// A rollback deliberately re-points the tag at the older image, so pulling would immediately undo
+// it and the helper would "roll back" onto the very build being rolled back.
+func TestRecreateScript_RollbackDoesNotPull(t *testing.T) {
+	var docs []inspectDoc
+	if err := json.Unmarshal([]byte(sample), &docs); err != nil {
+		t.Fatal(err)
+	}
+	s := recreateScript(docs[0], "belay-previous", "belay:latest", false)
+	if strings.Contains(s, "docker pull") {
+		t.Errorf("rollback script pulls, which would fetch the image it is rolling back from:\n%s", s)
+	}
+}
+
+func TestSettle_KeepsTheRollbackPointButEndsThePhase(t *testing.T) {
+	dir := t.TempDir()
+	rb := &RollbackPoint{Image: "sha256:old", Tag: previousTag, Version: "0.2.9",
+		Until: time.Now().Add(time.Hour)}
+	settle(dir, State{Phase: PhaseApplied, Rollback: rb})
+	got := LoadState(dir)
+	if got.Phase != "" {
+		t.Errorf("phase should be over, got %q", got.Phase)
+	}
+	if got.Rollback == nil || got.Rollback.Version != "0.2.9" {
+		t.Fatal("the way back must outlive the update that created it")
+	}
+}
+
+func TestFromLabel_PrefersTheVersionOverADigest(t *testing.T) {
+	withVer := State{FromVersion: "0.2.9", FromImage: "sha256:cd1ea4999c8f41383bc37fefa77469e1"}
+	if got := withVer.fromLabel(); got != "0.2.9" {
+		t.Errorf("got %q, want the version", got)
+	}
+	// A journal written before the version was recorded still has to render sanely.
+	noVer := State{FromImage: "sha256:cd1ea4999c8f41383bc37fefa77469e1"}
+	if got := noVer.fromLabel(); got != "sha256:cd1ea4999c8f" {
+		t.Errorf("got %q, want a short digest", got)
+	}
 }

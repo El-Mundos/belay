@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -37,15 +38,53 @@ const (
 
 // State is the on-disk journal.
 type State struct {
-	Phase     string    `json:"phase"`
-	Container string    `json:"container"`
-	Backup    string    `json:"backup"`     // the renamed previous container, kept as rollback material
-	FromImage string    `json:"from_image"` // image ID that was running when Apply was called
-	ToImage   string    `json:"to_image"`   // image ref being deployed
-	Started   time.Time `json:"started"`
+	Phase       string        `json:"phase"`
+	Container   string        `json:"container"`
+	Backup      string        `json:"backup"`       // the renamed previous container, gate-window rollback material
+	FromImage   string        `json:"from_image"`   // image ID that was running when Apply was called
+	FromVersion string        `json:"from_version"` // the version string that image was, e.g. "0.2.9"
+	ToImage     string        `json:"to_image"`     // image ref being deployed
+	Window      time.Duration `json:"window"`       // how long a manual rollback stays offered
+	Started     time.Time     `json:"started"`
+
+	// Rollback outlives the update itself: it is what a MANUAL rollback needs, hours later, once
+	// the previous container has been reaped and the tag has moved off the previous image.
+	Rollback *RollbackPoint `json:"rollback,omitempty"`
+}
+
+// RollbackPoint is the retained way back from a completed self-update.
+type RollbackPoint struct {
+	Image   string    `json:"image"`   // image ID of the build we came from
+	Tag     string    `json:"tag"`     // local tag holding that image against `docker image prune`
+	Version string    `json:"version"` // human version, for the History row and the confirm text
+	Until   time.Time `json:"until"`   // end of the retention window
 }
 
 func journalPath(dir string) string { return filepath.Join(dir, journalName) }
+
+// fromLabel is what to show as the previous version. Once a moving tag like :latest has advanced,
+// the build you were running has no name left, so fall back to a short image id rather than
+// printing 71 characters of digest at the user.
+func (s State) fromLabel() string {
+	if s.FromVersion != "" {
+		return s.FromVersion
+	}
+	if algo, hex, ok := strings.Cut(s.FromImage, ":"); ok && len(hex) > 12 {
+		return algo + ":" + hex[:12]
+	}
+	return s.FromImage
+}
+
+// settle ends an in-flight update while KEEPING any retained rollback point: the phase is over,
+// but the way back is supposed to outlive it. Deleting the journal here is what would silently
+// remove the manual-rollback offer the moment the update finished.
+func settle(dir string, st State) {
+	if st.Rollback == nil {
+		clearState(dir)
+		return
+	}
+	_ = saveState(dir, State{Rollback: st.Rollback})
+}
 
 // LoadState reads the journal. A missing or unreadable file is "nothing in flight", never an error:
 // a corrupt journal must not stop Belay from booting.
@@ -111,29 +150,34 @@ func (m *Manager) Reconcile(ctx context.Context, dir string) Outcome {
 
 	switch {
 	case st.Phase == PhaseApplying && !isOld:
-		// We are the new image and this is our first boot: the update took.
-		saveState(dir, State{Phase: PhaseApplied, Container: st.Container, Backup: st.Backup,
-			FromImage: st.FromImage, ToImage: st.ToImage, Started: st.Started})
-		return Outcome{Kind: "updated", From: st.FromImage, To: st.ToImage,
+		// We are the new image and this is our first boot: the update took. Retain the way back.
+		next := st
+		next.Phase = PhaseApplied
+		next.Rollback = &RollbackPoint{
+			Image: st.FromImage, Tag: previousTag, Version: st.FromVersion,
+			Until: time.Now().Add(st.Window),
+		}
+		saveState(dir, next)
+		return Outcome{Kind: "updated", From: st.fromLabel(), To: st.ToImage,
 			Detail: "Belay restarted on the new image", ReapAfter: st.Backup}
 
 	case st.Phase == PhaseApplying && isOld:
 		// The helper never got the new container running — it died mid-flight, or the new image
 		// failed to start and it put us back.
-		clearState(dir)
-		return Outcome{Kind: "error", From: st.FromImage, To: st.ToImage,
+		settle(dir, st)
+		return Outcome{Kind: "error", From: st.fromLabel(), To: st.ToImage,
 			Detail: "self-update did not take: Belay is still running the previous image"}
 
 	case st.Phase == PhaseApplied && isOld:
 		// We reported success on a previous boot and are now the OLD image again: the helper's
 		// health gate failed after we came up, and it rolled us back.
-		clearState(dir)
-		return Outcome{Kind: "rolled_back", From: st.FromImage, To: st.ToImage,
+		settle(dir, st)
+		return Outcome{Kind: "rolled_back", From: st.fromLabel(), To: st.ToImage,
 			Detail: "the new image did not stay healthy; Belay was rolled back to the previous container"}
 
 	default:
 		// Phase applied and we are the new image: a normal restart after a settled update.
-		clearState(dir)
+		settle(dir, st)
 		return Outcome{ReapAfter: st.Backup}
 	}
 }
@@ -146,8 +190,8 @@ func (m *Manager) Reap(ctx context.Context, dir, container string) {
 	}
 	_ = runDocker(ctx, "rm", "-f", container)
 	_ = runDocker(ctx, "rm", "-f", helperName) // the finished helper, exited 0
-	if LoadState(dir).Phase == PhaseApplied {
-		clearState(dir)
+	if st := LoadState(dir); st.Phase == PhaseApplied {
+		settle(dir, st)
 	}
 }
 

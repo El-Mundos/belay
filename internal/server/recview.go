@@ -30,10 +30,29 @@ type recView struct {
 	HasDetails bool   // there are logs or an error worth opening
 
 	// History-only: state of the manual-rollback button.
-	CanRollback bool   // newest success for this service, still within the retention window
-	Superseded  bool   // an older success whose rollback point was replaced by a newer update
-	PID         int    // project id, for the rollback POST
-	Expires     string // human "expires …" for the button tooltip
+	CanRollback  bool   // newest success for this service, still within the retention window
+	SelfRollback bool   // this is Belay's own update and the previous image is still retained
+	Superseded   bool   // an older success whose rollback point was replaced by a newer update
+	PID          int    // project id, for the rollback POST
+	Expires      string // human "expires …" for the button tooltip
+
+	// RollbackWhy explains a DISABLED button. Empty means show no button at all — a row that never
+	// had a rollback point must not be dressed up as one whose window expired, which is what a
+	// blanket "expired" tooltip did to Belay's own self-update rows.
+	RollbackWhy string
+}
+
+// SelfUpdateProject / SelfUpdateService label Belay's own update in the shared History. They are
+// constants because two places must agree on them: the writer (reconcileSelfUpdate) and the reader
+// (the History handler, deciding whether to offer a self-rollback).
+const (
+	SelfUpdateProject = "belay"
+	SelfUpdateService = "belay (self-update)"
+)
+
+// IsSelfUpdate reports whether a record is Belay updating itself rather than a compose service.
+func (v recView) IsSelfUpdate() bool {
+	return v.Project == SelfUpdateProject && v.Service == SelfUpdateService
 }
 
 func newRecView(r store.Record) recView {
@@ -116,8 +135,9 @@ func errPreview(msg string) (preview string, more bool) {
 func listRev(rows []recView) string {
 	h := fnv.New64a()
 	for _, r := range rows {
-		fmt.Fprintf(h, "%d|%s|%s|%s|%s|%t|%t|%s;",
-			r.ID, r.Outcome, r.From, r.To, r.Duration, r.CanRollback, r.Superseded, r.Expires)
+		fmt.Fprintf(h, "%d|%s|%s|%s|%s|%t|%t|%t|%s|%s;",
+			r.ID, r.Outcome, r.From, r.To, r.Duration,
+			r.CanRollback, r.SelfRollback, r.Superseded, r.Expires, r.RollbackWhy)
 	}
 	return strconv.FormatUint(h.Sum64(), 36)
 }

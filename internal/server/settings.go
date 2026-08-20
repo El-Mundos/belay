@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"html"
 	"html/template"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/El-Mundos/belay/internal/registry"
 	"github.com/El-Mundos/belay/internal/selfupdate"
 	"github.com/El-Mundos/belay/internal/store"
+	"github.com/El-Mundos/belay/internal/version"
 )
 
 // regRow is one private-registry credential row on the settings page.
@@ -290,15 +292,15 @@ func (s *Server) reconcileSelfUpdate() {
 	defer cancel()
 	out := s.su.Reconcile(ctx, s.cfg.DataDir)
 	if out.Kind != "" {
-		from, to := shortID(out.From), out.To
+		from, to := out.From, out.To
 		s.store.Add(store.Record{
-			Project: "belay", Service: "belay (self-update)", From: from, To: to,
+			Project: SelfUpdateProject, Service: SelfUpdateService, From: from, To: to,
 			Outcome: out.Kind, Err: outcomeErr(out), Duration: "-",
 		})
 		log.Printf("self-update: %s — %s", out.Kind, out.Detail)
 		if out.Kind != "updated" {
 			s.notify.Failure(notify.Event{
-				Project: "belay", Service: "belay (self-update)", From: from, To: to,
+				Project: SelfUpdateProject, Service: SelfUpdateService, From: from, To: to,
 				Outcome: out.Kind, Error: out.Detail,
 			})
 		}
@@ -343,12 +345,76 @@ func (s *Server) handleAgentSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `<span class="err">host offline</span>`)
 		return
 	}
+	// Nothing to do is not a silent no-op: pressing update on an agent that already matches the
+	// server would queue a command whose helper correctly decides there is nothing to swap, and the
+	// button would appear to do nothing at all.
+	if c.version == version.Version {
+		fmt.Fprintf(w, `<span class="muted">already on v%s</span>`, html.EscapeString(version.Version))
+		return
+	}
+	cmd := cluster.Command{ID: newToken()[:12], Kind: cluster.KindSelf, Image: s.su.Image()}
 	select {
-	case c.queue <- cluster.Command{ID: newToken()[:12], Kind: cluster.KindSelf, Image: s.su.Image()}:
-		fmt.Fprint(w, `<span class="ok">queued — the agent will drop off and re-register on the new image</span>`)
+	case c.queue <- cmd:
+		// Same treatment as any other remote update, so it is visible while it happens.
+		s.jobs.startRemote(host, "belay-agent", "agent", s.su.Image(), cmd.ID)
+		fmt.Fprint(w, `<span class="ok">queued — see Activity; the agent re-registers on the new image</span>`)
 	default:
 		fmt.Fprint(w, `<span class="err">agent queue full</span>`)
 	}
+}
+
+// rollbackWindow is how long a manual rollback stays on offer, shared with per-service retention:
+// one setting, because it answers the same question for both.
+func (s *Server) rollbackWindow() time.Duration {
+	h := s.set.Get().RollbackWindowHours
+	if h <= 0 {
+		return 0
+	}
+	return time.Duration(h) * time.Hour
+}
+
+// selfRollbackPoint returns the live manual-rollback offer for a completed self-update, if any.
+func (s *Server) selfRollbackPoint() *selfupdate.RollbackPoint {
+	rb := selfupdate.LoadState(s.cfg.DataDir).Rollback
+	if rb == nil || time.Now().After(rb.Until) {
+		return nil
+	}
+	return rb
+}
+
+// handleSelfRollback puts Belay back on the image it ran before its last self-update.
+func (s *Server) handleSelfRollback(w http.ResponseWriter, r *http.Request) {
+	if s.su == nil || !s.su.Enabled() {
+		http.Error(w, "self-update not available (belay is not running in a detectable container)", http.StatusBadRequest)
+		return
+	}
+	if err := s.su.Rollback(r.Context(), s.cfg.DataDir); err != nil {
+		http.Error(w, "rollback failed to launch: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeReconnectPage(w, "Belay is rolling back…", "Restoring the previous image. This page will reconnect in ~15s.")
+}
+
+// handleSelfUpdateCheck asks the registry right now instead of waiting for the periodic watcher.
+func (s *Server) handleSelfUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if s.su == nil || !s.su.Enabled() {
+		fmt.Fprint(w, `<span class="muted small">self-update unavailable (not in a container)</span>`)
+		return
+	}
+	avail, err := s.su.Available(r.Context())
+	if err != nil {
+		fmt.Fprintf(w, `<span class="err small">check failed: %s</span>`, html.EscapeString(err.Error()))
+		return
+	}
+	s.mu.Lock()
+	s.suAvail = avail
+	s.mu.Unlock()
+	if avail {
+		fmt.Fprint(w, `<span class="ok small">an update is available — reload to see the banner</span>`)
+		return
+	}
+	fmt.Fprintf(w, `<span class="muted small">up to date (v%s, checked just now)</span>`, html.EscapeString(version.Version))
 }
 
 // handleSelfUpdate recreates the belay container from the current image tag. Belay is torn down and
@@ -358,16 +424,23 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "self-update not available (belay is not running in a detectable container)", http.StatusBadRequest)
 		return
 	}
-	if err := s.su.Apply(r.Context(), s.cfg.DataDir); err != nil {
+	if err := s.su.Apply(r.Context(), s.cfg.DataDir, version.Version, s.rollbackWindow()); err != nil {
 		http.Error(w, "self-update failed to launch: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.writeReconnectPage(w, "Belay is updating itself…",
+		"The container is being recreated on the new image. This page will reconnect in ~15s.")
+}
+
+// writeReconnectPage is shown while Belay is being replaced: the helper is about to kill this
+// process, so the response has to be sent before anything happens and stand on its own afterwards.
+func (s *Server) writeReconnectPage(w http.ResponseWriter, title, detail string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, `<!doctype html><meta charset=utf-8><title>Belay updating…</title>
+	fmt.Fprintf(w, `<!doctype html><meta charset=utf-8><title>Belay</title>
 <meta http-equiv="refresh" content="15;url=/">
 <style>body{font:15px/1.6 -apple-system,sans-serif;background:#0e1014;color:#e6e8ee;display:grid;place-items:center;height:100vh;margin:0}</style>
-<div style="text-align:center"><h2>⚓ Belay is updating itself…</h2>
-<p>The container is being recreated on the new image. This page will reconnect in ~15s.</p></div>`)
+<div style="text-align:center"><h2>⚓ %s</h2><p>%s</p></div>`,
+		html.EscapeString(title), html.EscapeString(detail))
 }
 
 // ---- metrics ----

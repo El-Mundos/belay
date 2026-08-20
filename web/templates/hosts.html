@@ -38,9 +38,12 @@
               onsubmit="return belayConfirm('Update Belay itself now? Belay will restart from the new image (a few seconds of downtime). If the new image fails to stay up, the previous container is put back automatically.', this, 'Update Belay')">
           <button class="btn" type="submit">⬆ Update Belay</button>
         </form>
-      {{else}}
-        <span class="muted small">up to date</span>
       {{end}}
+      {{/* Belay checks itself on a timer; this is for when you already know a release shipped
+           and would rather not wait for the next tick. */}}
+      <button class="btn ghost" hx-post="/self-update/check" hx-target="#su-check" hx-swap="innerHTML"
+              hx-indicator="#su-check">Check for updates</button>
+      <span id="su-check" class="muted small">{{if not $.SelfUpdate}}up to date{{end}}</span>
     {{else if $h.Stale}}
       <button class="btn" hx-post="/agent-update" hx-vals='{"host":"{{$h.Host}}"}' hx-swap="outerHTML"
               hx-confirm="Update the agent on {{$h.Host}}? It hands off to a helper container, drops off this list, and re-registers on the new image. If the new image fails to stay up, the previous container is restored."

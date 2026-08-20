@@ -189,7 +189,50 @@ const helperName = "belay-selfupdate"
 //
 // dir is the data directory holding the journal (see journal.go); passing "" runs without one,
 // which still updates but leaves nobody able to report what happened if it goes wrong.
-func (m *Manager) Apply(ctx context.Context, dir string) error {
+// previousTag is the local tag kept on the image Belay was running before an update. A tag is the
+// only thing that keeps that image out of reach of `docker image prune`: once :latest moves, the
+// build you were running becomes dangling and one prune away from being unrecoverable — and it is
+// the only thing a manual rollback can go back to.
+const previousTag = "belay:previous"
+
+// Apply replaces Belay with the current image tag. See applyImage.
+func (m *Manager) Apply(ctx context.Context, dir string, fromVersion string, window time.Duration) error {
+	return m.applyImage(ctx, dir, m.image, fromVersion, window, true)
+}
+
+// Rollback undoes a completed self-update, putting back the image Belay was running before it.
+//
+// This is a separate path from the helper's automatic rollback, which only covers the gate window
+// (seconds) and works by restoring the previous CONTAINER. By the time a human decides an update
+// was a mistake, that container is long reaped — so this rebuilds from the retained IMAGE instead.
+func (m *Manager) Rollback(ctx context.Context, dir string) error {
+	st := LoadState(dir)
+	rb := st.Rollback
+	if rb == nil {
+		return fmt.Errorf("no self-update to roll back")
+	}
+	if time.Now().After(rb.Until) {
+		return fmt.Errorf("the rollback window for this self-update has passed")
+	}
+	if _, err := dockerOut(ctx, "image", "inspect", rb.Image, "--format", "{{.Id}}"); err != nil {
+		return fmt.Errorf("the previous image is no longer on this host (pruned?)")
+	}
+	// Re-point the tracked ref at the old build and recreate from it WITHOUT pulling. Running the
+	// bare image id instead would leave the container tracking an id rather than a tag, and Belay
+	// would never notice a future release; this way the next check pulls, sees the newer build, and
+	// offers it again — a rollback, not a dead end.
+	if err := runDocker(ctx, "tag", rb.Image, m.image); err != nil {
+		return fmt.Errorf("re-tag previous image: %w", err)
+	}
+	return m.applyImage(ctx, dir, m.image, rb.Version, rb.Until.Sub(time.Now()), false)
+}
+
+// applyImage recreates Belay's container onto target, handing off to a helper that outlives this
+// process. It returns once the helper is launched — Belay is torn down moments later.
+//
+// dir is the data directory holding the journal (see journal.go); passing "" runs without one,
+// which still updates but leaves nobody able to report what happened if it goes wrong.
+func (m *Manager) applyImage(ctx context.Context, dir, target, fromVersion string, window time.Duration, pull bool) error {
 	if !m.Enabled() {
 		return fmt.Errorf("self-update not available (not running in a detectable container)")
 	}
@@ -201,19 +244,24 @@ func (m *Manager) Apply(ctx context.Context, dir string) error {
 	if err := json.Unmarshal(raw, &docs); err != nil || len(docs) == 0 {
 		return fmt.Errorf("inspect self: %v", err)
 	}
-	// The image ID we are running now — the journal's test for "am I still the old Belay?".
+	// The image ID we are running now — the journal's test for "am I still the old Belay?", and
+	// the thing a later manual rollback goes back to.
 	runningID, err := dockerOut(ctx, "inspect", m.container, "--format", "{{.Image}}")
 	if err != nil {
 		return fmt.Errorf("inspect self image: %w", err)
 	}
+	// Keep the outgoing image reachable by name before anything moves the tag off it.
+	_ = runDocker(ctx, "tag", runningID, previousTag)
+
 	backup := m.container + "-previous"
 	if err := saveState(dir, State{
 		Phase: PhaseApplying, Container: m.container, Backup: backup,
-		FromImage: runningID, ToImage: m.image, Started: time.Now(),
+		FromImage: runningID, FromVersion: fromVersion, ToImage: target,
+		Window: window, Started: time.Now(),
 	}); err != nil {
 		return fmt.Errorf("write self-update journal: %w", err)
 	}
-	script := recreateScript(docs[0], backup)
+	script := recreateScript(docs[0], backup, target, pull)
 
 	// A leftover helper from a previous attempt would hold the name; it has already finished.
 	_ = runDocker(ctx, "rm", "-f", helperName)
@@ -232,7 +280,7 @@ func (m *Manager) Apply(ctx context.Context, dir string) error {
 		args = append(args, "-v", "/var/run/docker.sock:/var/run/docker.sock")
 	}
 	// same belay image, run as a shell; sleep briefly so belay can answer the HTTP request first
-	args = append(args, "--entrypoint", "sh", m.image, "-c", "sleep 3; "+script)
+	args = append(args, "--entrypoint", "sh", target, "-c", "sleep 3; "+script)
 	if err := exec.CommandContext(ctx, "docker", args...).Run(); err != nil {
 		clearState(dir) // nothing was launched, so nothing is in flight
 		return err
@@ -252,9 +300,12 @@ func (m *Manager) Apply(ctx context.Context, dir string) error {
 //     run again from any point: it exits immediately if the target is already up on the new image.
 //   - It GATES on the new container still running after a wait, and rolls back if not — a
 //     crash-looping new image no longer leaves the host with no Belay.
-func recreateScript(d inspectDoc, backup string) string {
+//
+// pull controls whether the helper refreshes the image first. An update must (the whole point is
+// to fetch a newer build); a rollback must NOT, because the tag has deliberately been re-pointed at
+// the older image locally and pulling would undo that immediately.
+func recreateScript(d inspectDoc, backup, image string, pull bool) string {
 	name := strings.TrimPrefix(d.Name, "/")
-	image := d.Config.Image
 
 	run := []string{"docker", "run", "-d", "--name", name}
 	if p := d.HostConfig.RestartPolicy.Name; p != "" && p != "no" {
@@ -313,11 +364,17 @@ func recreateScript(d inspectDoc, backup string) string {
 
 	var b strings.Builder
 	b.WriteString("set -e\n")
+	// PULL FIRST. The "already done?" check below compares the tag against the running container,
+	// and on a moving tag like :latest the local copy is usually stale -- an agent never pulls on
+	// its own. Checking before pulling therefore compares yesterday's image against itself, decides
+	// the work is done, and exits 0 having updated nothing.
+	if pull {
+		b.WriteString("docker pull " + qimage + " 2>/dev/null || true\n")
+	}
 	// Already done? A restarted helper must not tear down a healthy new container and start over.
 	b.WriteString("target=$(docker image inspect -f '{{.Id}}' " + qimage + " 2>/dev/null || echo none)\n")
 	b.WriteString("current=$(docker inspect -f '{{.Image}}' " + qname + " 2>/dev/null || echo none)\n")
 	b.WriteString("if [ \"$target\" = \"$current\" ] && [ \"$(" + running + ")\" = \"true\" ]; then exit 0; fi\n")
-	b.WriteString("docker pull " + qimage + " 2>/dev/null || true\n")
 	// Keep the old container as the rollback target instead of destroying it.
 	b.WriteString("docker rm -f " + qbackup + " 2>/dev/null || true\n")
 	b.WriteString("docker stop " + qname + " 2>/dev/null || true\n")
