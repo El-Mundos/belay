@@ -9,12 +9,15 @@
 {{range $h := .Hosts}}
 <div class="card host-card{{if $h.Local}} host-local{{end}}">
   <h3>{{$h.Host}}
-    {{if $h.Local}}<span class="chip">this host</span>{{end}}
-    {{if $h.Online}}<span class="badge-ok">● online</span>{{else}}<span class="muted small">○ last seen {{$h.Ago}} ago</span>{{end}}
+    {{if $h.Local}}
+      {{/* No online badge here: this host is serving the page you are reading it on. */}}
+      <span class="chip chip-main">main host</span>
+    {{else if $h.Online}}<span class="badge-ok">● online</span>
+    {{else}}<span class="muted small">○ last seen {{$h.Ago}} ago</span>{{end}}
   </h3>
   <p class="muted small">{{len $h.Projects}} stack(s)
     {{if $h.Local}}
-      <span class="muted small">· server · v{{$h.Version}}</span>
+      <span class="muted small">· serves this UI{{if $.AgentsEnabled}} and manages the agents{{end}} · v{{$h.Version}}</span>
     {{else if $h.Stale}}
       <span class="major-tag" title="This agent is not running the same version as the server. Newer commands may carry fields it ignores silently — update it.">version {{if $h.Version}}{{$h.Version}}{{else}}unknown{{end}}</span>
     {{else}}
