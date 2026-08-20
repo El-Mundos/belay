@@ -45,7 +45,7 @@ func runAgent(args []string) {
 	}
 	host := *name
 	if host == "" {
-		host, _ = os.Hostname()
+		host = agent.HostName(context.Background()) // the machine, not this container's id
 	}
 	eng := &engine.Engine{Deployer: agent.Local{}, Health: health.Gate{Timeout: *timeout, MinUptime: *minUptime}}
 	if *snapshot {

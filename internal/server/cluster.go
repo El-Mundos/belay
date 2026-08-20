@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"html"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -156,12 +155,8 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 
 // localHost describes the machine this server runs on, in the same shape as an agent.
 func (s *Server) localHost() hostView {
-	name, _ := os.Hostname()
-	if name == "" {
-		name = "local"
-	}
 	h := hostView{
-		Host: name, Online: true, Ago: "now", Local: true,
+		Host: s.hostName, Online: true, Ago: "now", Local: true,
 		Version: version.Version,
 	}
 	for _, p := range s.cfg.Projects {

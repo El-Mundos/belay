@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -70,6 +71,26 @@ func (l Local) Logs(ctx context.Context, r engine.Request, tail int) (string, er
 	out, _ := output(ctx, "docker", "compose", "-f", f, "logs",
 		"--no-color", "--no-log-prefix", "--tail", strconv.Itoa(tail), r.Service)
 	return out, nil
+}
+
+// HostName is the name of the MACHINE Belay manages, which is not the same as this process's
+// hostname: inside a container os.Hostname() returns the container ID, so a containerised Belay
+// would call itself "e450a426f5bb". The Docker daemon knows the real name, so ask it, and fall
+// back to the process hostname when it can't be reached (no Docker, or a socket-proxy with INFO=0).
+// BELAY_HOST_NAME overrides both.
+func HostName(ctx context.Context) string {
+	if n := strings.TrimSpace(os.Getenv("BELAY_HOST_NAME")); n != "" {
+		return n
+	}
+	if out, err := output(ctx, "docker", "info", "--format", "{{.Name}}"); err == nil {
+		if n := strings.TrimSpace(out); n != "" {
+			return n
+		}
+	}
+	if n, err := os.Hostname(); err == nil && n != "" {
+		return n
+	}
+	return "local"
 }
 
 func run(ctx context.Context, name string, args ...string) error {

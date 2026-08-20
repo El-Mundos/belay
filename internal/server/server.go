@@ -57,19 +57,20 @@ type Config struct {
 }
 
 type Server struct {
-	cfg     Config
-	reg     *registry.Client
-	eng     *engine.Engine
-	store   *store.Store
-	set     *config.Store
-	notify  *notify.Notifier
-	tpl     map[string]*template.Template
-	mu      sync.Mutex
-	sess    map[string]struct{}
-	checks  map[string]checkResult // auto-check cache, key project\x00service
-	jobs    *jobManager            // live activity panel (SSE)
-	su      *selfupdate.Manager    // belay self-update (nil-safe if not in a container)
-	suAvail bool                   // cached: a newer belay image is available
+	cfg      Config
+	reg      *registry.Client
+	eng      *engine.Engine
+	store    *store.Store
+	set      *config.Store
+	notify   *notify.Notifier
+	tpl      map[string]*template.Template
+	mu       sync.Mutex
+	sess     map[string]struct{}
+	checks   map[string]checkResult // auto-check cache, key project\x00service
+	jobs     *jobManager            // live activity panel (SSE)
+	su       *selfupdate.Manager    // belay self-update (nil-safe if not in a container)
+	hostName string                 // the machine Belay manages (not this container's id)
+	suAvail  bool                   // cached: a newer belay image is available
 
 	dockerCfgDir string // DOCKER_CONFIG dir holding generated auths for private-registry pulls
 
@@ -164,11 +165,12 @@ func New(cfg Config) *Server {
 			"review":       page("templates/layout.html", "templates/review.html"),
 			"reviewstatus": page("templates/reviewstatus.html"),
 		},
-		sess:   map[string]struct{}{},
-		checks: map[string]checkResult{},
-		jobs:   newJobManager(),
-		su:     selfupdate.Detect(context.Background()),
-		agents: map[string]*agentConn{},
+		sess:     map[string]struct{}{},
+		checks:   map[string]checkResult{},
+		jobs:     newJobManager(),
+		su:       selfupdate.Detect(context.Background()),
+		hostName: agent.HostName(context.Background()),
+		agents:   map[string]*agentConn{},
 	}
 	// private registries: the version-check client reads creds live; the pull reads a generated
 	// docker config.json (DOCKER_CONFIG) so `docker compose up --pull` can authenticate too.
