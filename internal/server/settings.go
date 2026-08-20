@@ -395,26 +395,102 @@ func (s *Server) handleSelfRollback(w http.ResponseWriter, r *http.Request) {
 	s.writeReconnectPage(w, "Belay is rolling back…", "Restoring the previous image. This page will reconnect in ~15s.")
 }
 
-// handleSelfUpdateCheck asks the registry right now instead of waiting for the periodic watcher.
-func (s *Server) handleSelfUpdateCheck(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+// checkBelayImage refreshes "is a newer Belay published?" from the registry. Server and agents run
+// the SAME image, so one registry round trip answers for every host — an agent card does not need
+// to reach the agent to know whether a newer build exists.
+func (s *Server) checkBelayImage(ctx context.Context) (bool, error) {
 	if s.su == nil || !s.su.Enabled() {
-		fmt.Fprint(w, `<span class="muted small">self-update unavailable (not in a container)</span>`)
-		return
+		return false, fmt.Errorf("not running in a container")
 	}
-	avail, err := s.su.Available(r.Context())
+	avail, err := s.su.Available(ctx)
 	if err != nil {
-		fmt.Fprintf(w, `<span class="err small">check failed: %s</span>`, html.EscapeString(err.Error()))
-		return
+		return false, err
 	}
 	s.mu.Lock()
 	s.suAvail = avail
 	s.mu.Unlock()
-	if avail {
-		fmt.Fprint(w, `<span class="ok small">an update is available — reload to see the banner</span>`)
+	return avail, nil
+}
+
+// handleHostCheck answers "is this host behind?" for one card — the local host or an agent.
+func (s *Server) handleHostCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	host := r.FormValue("host")
+	// Best effort: only the LOCAL card's answer depends on the registry. An agent is judged by the
+	// version it reported against the version we run, which needs neither Docker nor a network --
+	// so a failed registry check must not turn every agent card's button into an error.
+	avail, err := s.checkBelayImage(r.Context())
+	if host == "" { // the local host: compare the registry against what we are running
+		if err != nil {
+			fmt.Fprintf(w, `<span class="err small">check failed: %s</span>`, html.EscapeString(err.Error()))
+			return
+		}
+		if avail {
+			fmt.Fprint(w, `<span class="ok small">a newer image is available — reload for the button</span>`)
+			return
+		}
+		fmt.Fprintf(w, `<span class="muted small">up to date (v%s, just checked)</span>`, html.EscapeString(version.Version))
 		return
 	}
-	fmt.Fprintf(w, `<span class="muted small">up to date (v%s, checked just now)</span>`, html.EscapeString(version.Version))
+	s.agentsMu.Lock()
+	c := s.agents[host]
+	var av string
+	if c != nil {
+		av = c.version
+	}
+	s.agentsMu.Unlock()
+	switch {
+	case c == nil:
+		fmt.Fprint(w, `<span class="err small">host offline</span>`)
+	case av == "":
+		fmt.Fprint(w, `<span class="err small">agent too old to report its version — update it</span>`)
+	case av != version.Version:
+		fmt.Fprintf(w, `<span class="ok small">v%s → v%s available</span>`,
+			html.EscapeString(av), html.EscapeString(version.Version))
+	case err == nil && avail:
+		// The agent matches us, but we are both behind the registry — say so, rather than
+		// "up to date", which would be true only relative to a server that is itself stale.
+		fmt.Fprintf(w, `<span class="muted small">matches this server (v%s) — but a newer image exists; update the main host first</span>`,
+			html.EscapeString(av))
+	default:
+		fmt.Fprintf(w, `<span class="muted small">up to date (v%s, just checked)</span>`, html.EscapeString(av))
+	}
+}
+
+// handleHostsCheckAll refreshes the registry once and re-renders every card, so a fleet answers in
+// one click instead of one click per host.
+func (s *Server) handleHostsCheckAll(w http.ResponseWriter, r *http.Request) {
+	_, _ = s.checkBelayImage(r.Context())
+	s.handleHosts(w, r) // htmx picks #host-cards out of the re-rendered page
+}
+
+// handleAgentsUpdateAll updates every agent that is behind.
+//
+// The SERVER is deliberately excluded. Its update tears down the page issuing the request, and a
+// fleet action that also logs you out mid-click is a surprise -- the local card keeps its own
+// explicit button.
+func (s *Server) handleAgentsUpdateAll(w http.ResponseWriter, r *http.Request) {
+	s.agentsMu.Lock()
+	var behind []*agentConn
+	for _, c := range s.agents {
+		if c.version != version.Version && time.Since(c.lastSeen) < 90*time.Second {
+			behind = append(behind, c)
+		}
+	}
+	s.agentsMu.Unlock()
+
+	queued := 0
+	for _, c := range behind {
+		cmd := cluster.Command{ID: newToken()[:12], Kind: cluster.KindSelf, Image: s.su.Image()}
+		select {
+		case c.queue <- cmd:
+			s.jobs.startRemote(c.host, "belay-agent", "agent", s.su.Image(), cmd.ID)
+			queued++
+		default:
+		}
+	}
+	log.Printf("agents: queued %d self-update(s)", queued)
+	s.handleHosts(w, r)
 }
 
 // handleSelfUpdate recreates the belay container from the current image tag. Belay is torn down and

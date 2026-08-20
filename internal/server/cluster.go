@@ -126,6 +126,7 @@ type hostView struct {
 	Version  string // build version ("" = an agent older than the field)
 	Stale    bool   // differs from this server's version
 	Local    bool   // this Belay itself, not an agent
+	Idx      int    // stable per-render id, so each card can target its own status line
 }
 
 func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
@@ -147,17 +148,30 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	// out of date. Leaving it out made "Hosts" mean "everywhere except here", so a single-host
 	// install saw an empty page describing a machine it was looking at.
 	hosts = append([]hostView{s.localHost()}, hosts...)
+	for i := range hosts {
+		hosts[i].Idx = i
+	}
+	stale := 0
+	for _, h := range hosts {
+		if !h.Local && h.Stale {
+			stale++
+		}
+	}
 	data := s.base(r, "hosts")
 	data["Hosts"] = hosts
+	data["StaleAgents"] = stale
 	data["AgentsEnabled"] = s.agentsEnabled()
 	s.render(w, "hosts", data)
 }
 
 // localHost describes the machine this server runs on, in the same shape as an agent.
 func (s *Server) localHost() hostView {
+	s.mu.Lock()
+	avail := s.suAvail
+	s.mu.Unlock()
 	h := hostView{
 		Host: s.hostName, Online: true, Ago: "now", Local: true,
-		Version: version.Version,
+		Version: version.Version, Stale: avail,
 	}
 	for _, p := range s.cfg.Projects {
 		cp := cluster.Project{Name: p.Name, File: p.File}

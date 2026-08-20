@@ -151,11 +151,18 @@ func (m *Manager) Reconcile(ctx context.Context, dir string) Outcome {
 	switch {
 	case st.Phase == PhaseApplying && !isOld:
 		// We are the new image and this is our first boot: the update took. Retain the way back.
+		window := st.Window
+		if window <= 0 {
+			window = DefaultRollbackWindow
+		}
+		// Hold the image we came from under a name. Apply does this too, but a journal written by an
+		// older Belay never did — and an untagged image is dangling the moment the tag moves on.
+		_ = runDocker(ctx, "tag", st.FromImage, previousTag)
 		next := st
 		next.Phase = PhaseApplied
 		next.Rollback = &RollbackPoint{
 			Image: st.FromImage, Tag: previousTag, Version: st.FromVersion,
-			Until: time.Now().Add(st.Window),
+			Until: time.Now().Add(window),
 		}
 		saveState(dir, next)
 		return Outcome{Kind: "updated", From: st.fromLabel(), To: st.ToImage,
@@ -194,6 +201,12 @@ func (m *Manager) Reap(ctx context.Context, dir, container string) {
 		settle(dir, st)
 	}
 }
+
+// DefaultRollbackWindow is used when the journal carries no window of its own. A journal written by
+// a Belay from before that field existed decodes it as zero, and zero would mean "expired the
+// instant it was created" -- the worst possible reading for a safety feature, and one that silently
+// removes the rollback offer on exactly the upgrade that introduces it.
+const DefaultRollbackWindow = 24 * time.Hour
 
 // GateWindow is how long a new Belay must stay up before its predecessor is discarded. It matches
 // the wait inside the helper script: reaping earlier would destroy the only rollback target while

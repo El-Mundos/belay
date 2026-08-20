@@ -5,8 +5,20 @@
 <code>--agent-token</code> (or <code>BELAY_AGENT_TOKEN</code>) and run
 <code>belay agent --server &lt;url&gt; --token &lt;token&gt;</code> on another host to add one.</p>
 {{end}}
-<div class="host-cards">
-{{range $h := .Hosts}}
+
+<div class="toolbar">
+  <button class="btn ghost" hx-post="/hosts/check-all" hx-target="#host-cards" hx-select="#host-cards"
+          hx-swap="outerHTML">Check all for updates</button>
+  {{if .StaleAgents}}
+    <button class="btn" hx-post="/agents/update-all" hx-target="#host-cards" hx-select="#host-cards"
+            hx-swap="outerHTML"
+            hx-confirm="Update {{.StaleAgents}} agent(s) to v{{.Version}}? Each hands off to a helper on its own host and re-registers on the new image. This host is not included — update it from its own card."
+            data-ok-label="Update {{.StaleAgents}} agent(s)">⬆ Update all agents ({{.StaleAgents}})</button>
+  {{end}}
+</div>
+
+<div class="host-cards" id="host-cards">
+{{range $i, $h := .Hosts}}
 <div class="card host-card{{if $h.Local}} host-local{{end}}">
   <h3>{{$h.Host}}
     {{if $h.Local}}
@@ -19,7 +31,7 @@
     {{if $h.Local}}
       <span class="muted small">· serves this UI{{if $.AgentsEnabled}} and manages the agents{{end}} · v{{$h.Version}}</span>
     {{else if $h.Stale}}
-      <span class="major-tag" title="This agent is not running the same version as the server. Newer commands may carry fields it ignores silently — update it.">version {{if $h.Version}}{{$h.Version}}{{else}}unknown{{end}}</span>
+      <span class="major-tag" title="This agent is not running the same version as the server. Newer commands may carry fields it ignores silently — update it.">v{{if $h.Version}}{{$h.Version}}{{else}}unknown{{end}}</span>
     {{else}}
       <span class="muted small">· agent · v{{$h.Version}}</span>
     {{end}}
@@ -31,27 +43,31 @@
       🔒 {{range $prot}}<span class="chip">{{.}}</span>{{end}}
     </p>
   {{end}}
+
+  {{/* Pinned to the bottom of the card in a fixed two-slot grid, so every card's buttons line up
+       with every other card's whatever sits above them. */}}
   <div class="host-actions">
     {{if $h.Local}}
-      {{if $.SelfUpdate}}
-        <form method="post" action="/self-update" class="rec-action"
-              onsubmit="return belayConfirm('Update Belay itself now? Belay will restart from the new image (a few seconds of downtime). If the new image fails to stay up, the previous container is put back automatically.', this, 'Update Belay')">
+      {{if $h.Stale}}
+        <form method="post" action="/self-update" class="host-action"
+              onsubmit="return belayConfirm('Update Belay itself now? Belay restarts from the new image (a few seconds of downtime). If it fails to stay up, the previous container is put back automatically.', this, 'Update Belay')">
           <button class="btn" type="submit">⬆ Update Belay</button>
         </form>
+      {{else}}
+        <button class="btn ghost" disabled title="Belay is running the newest image it knows about">Up to date</button>
       {{end}}
-      {{/* Belay checks itself on a timer; this is for when you already know a release shipped
-           and would rather not wait for the next tick. */}}
-      <button class="btn ghost" hx-post="/self-update/check" hx-target="#su-check" hx-swap="innerHTML"
-              hx-indicator="#su-check">Check for updates</button>
-      <span id="su-check" class="muted small">{{if not $.SelfUpdate}}up to date{{end}}</span>
     {{else if $h.Stale}}
-      <button class="btn" hx-post="/agent-update" hx-vals='{"host":"{{$h.Host}}"}' hx-swap="outerHTML"
+      <button class="btn" hx-post="/agent-update" hx-vals='{"host":"{{$h.Host}}"}'
+              hx-target="#chk-{{$i}}" hx-swap="innerHTML"
               hx-confirm="Update the agent on {{$h.Host}}? It hands off to a helper container, drops off this list, and re-registers on the new image. If the new image fails to stay up, the previous container is restored."
               data-ok-label="Update agent">⬆ Update agent</button>
     {{else}}
-      <span class="muted small">up to date</span>
+      <button class="btn ghost" disabled title="This agent matches the server's version">Up to date</button>
     {{end}}
+    <button class="btn ghost" hx-post="/host-check" hx-vals='{"host":"{{if $h.Local}}{{else}}{{$h.Host}}{{end}}"}'
+            hx-target="#chk-{{$i}}" hx-swap="innerHTML">Check for updates</button>
   </div>
+  <div class="host-status" id="chk-{{$i}}"></div>
 </div>
 {{end}}
 </div>

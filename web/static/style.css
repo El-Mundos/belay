@@ -212,8 +212,16 @@ details.projgroup table { border:none; border-radius:0; }
   background:color-mix(in srgb, var(--accent) 12%, transparent); }
 .host-card h3 { margin:0 0 6px; font-size:14px; display:flex; align-items:center; gap:8px; }
 .chips { margin-top:6px; }
-.host-actions { margin-top:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-.host-actions .btn { margin:0; }
+/* Every host card is the same height and its buttons sit on the same line, whatever the card
+   holds above them: the grid stretches the cards, margin-top:auto pushes the actions to the
+   bottom, and the two slots are equal widths so "Update"/"Up to date" and "Check" always align. */
+.host-cards { align-items:stretch; grid-auto-rows:1fr; } /* same height in every row, not just within one */
+.host-card { display:flex; flex-direction:column; }
+.host-actions { margin-top:auto; padding-top:12px; display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.host-actions .btn { margin:0; width:100%; text-align:center; }
+.host-action { display:block; margin:0; }
+.host-status { min-height:1.2em; margin-top:8px; }
+.host-status:empty { margin-top:0; }
 .host-prot { margin:8px 0 0; }
 
 .rb-expired { cursor: not-allowed !important; }

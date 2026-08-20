@@ -162,3 +162,17 @@ func TestFromLabel_PrefersTheVersionOverADigest(t *testing.T) {
 		t.Errorf("got %q, want a short digest", got)
 	}
 }
+
+// A journal written by a Belay that predates the window field decodes it as zero. Treating that as
+// the literal window means the rollback point expires the moment it is created -- which is exactly
+// what happened on the first upgrade that shipped manual rollback.
+func TestReconcile_MissingWindowDoesNotExpireInstantly(t *testing.T) {
+	st := State{Window: 0}
+	window := st.Window
+	if window <= 0 {
+		window = DefaultRollbackWindow
+	}
+	if until := time.Now().Add(window); !until.After(time.Now().Add(time.Hour)) {
+		t.Fatalf("a journal with no window must fall back to a usable one, got %v", window)
+	}
+}
