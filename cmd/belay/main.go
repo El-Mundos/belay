@@ -75,6 +75,7 @@ func runServer(args []string) {
 	fs.Var(&projects, "project", "compose project path (file or dir); repeatable")
 	password := fs.String("password", os.Getenv("BELAY_PASSWORD"), "built-in login password (env BELAY_PASSWORD)")
 	forward := fs.String("forward-header", os.Getenv("BELAY_FORWARD_HEADER"), "trusted reverse-proxy user header (e.g. X-authentik-username)")
+	forwardGroups := fs.String("forward-groups-header", envOr("BELAY_FORWARD_GROUPS_HEADER", "X-authentik-groups"), "trusted reverse-proxy groups header, used by the Settings group gate")
 	notifyURL := fs.String("notify-webhook", os.Getenv("BELAY_NOTIFY_WEBHOOK"), "webhook URL to POST on failed updates (ntfy/Discord/Slack/…)")
 	agentToken := fs.String("agent-token", os.Getenv("BELAY_AGENT_TOKEN"), "shared token to accept remote agents (env BELAY_AGENT_TOKEN; empty = multi-host off)")
 	snapshot := fs.Bool("snapshot", true, "snapshot volumes before updating and restore data on rollback")
@@ -108,6 +109,7 @@ func runServer(args []string) {
 	}
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
+		ForwardGroupsHeader: *forwardGroups,
 		NotifyWebhook: *notifyURL, Snapshot: *snapshot, Timeout: *timeout, MinUptime: *minUptime,
 		RollbackWindow: *rollbackWindow, DataDir: *dataDir, AgentToken: *agentToken,
 	})
@@ -261,4 +263,12 @@ func printLogs(logs string) {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "belay:", err)
 	os.Exit(1)
+}
+
+// envOr returns the environment variable's value, or def when it is unset or empty.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

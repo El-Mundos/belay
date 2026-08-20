@@ -19,8 +19,15 @@ type Project struct {
 }
 
 // Registration is what an agent sends on connect / heartbeat.
+//
+// Version lets the server notice an agent running older code. The protocol tolerates skew on
+// purpose — an agent may be unreachable for a while, and encoding/json drops fields it doesn't know
+// — but that tolerance is silent: an old agent handed a Command with a field it predates ignores it
+// and fails in some unrelated-looking way later. Reporting the version turns that into something a
+// human can see. Empty means an agent from before this field existed.
 type Registration struct {
 	Host     string    `json:"host"`
+	Version  string    `json:"version,omitempty"`
 	Projects []Project `json:"projects"`
 }
 

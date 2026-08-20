@@ -21,6 +21,7 @@ import (
 	"github.com/El-Mundos/belay/internal/engine"
 	"github.com/El-Mundos/belay/internal/health"
 	"github.com/El-Mundos/belay/internal/registry"
+	"github.com/El-Mundos/belay/internal/version"
 )
 
 // runAgent runs a headless Belay agent: it dials OUT to a server, reports its local compose stacks,
@@ -172,7 +173,7 @@ type agentClient struct {
 }
 
 func (a *agentClient) register(projects []cluster.Project) error {
-	body, _ := json.Marshal(cluster.Registration{Host: a.host, Projects: projects})
+	body, _ := json.Marshal(cluster.Registration{Host: a.host, Version: version.Version, Projects: projects})
 	return a.do(a.hc, http.MethodPost, "/agent/register", body, nil)
 }
 

@@ -58,6 +58,7 @@ type Settings struct {
 	QuietEnd            int              `json:"quiet_end"`             // hour 0-23
 	Concurrency         int              `json:"concurrency"`           // parallel updates in update-all (min 1)
 	MetricsToken        string           `json:"metrics_token"`         // if set, /metrics requires ?token= or Bearer
+	RequireGroup        string           `json:"require_group"`         // if set, forward-auth callers must belong to this group
 	Notify              Notify           `json:"notify"`
 	Registries          []Registry       `json:"registries"` // private-registry credentials for checks + pulls
 	Pins                map[string]bool  `json:"pins"`       // key = project\x00service → ignored for updates

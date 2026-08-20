@@ -142,6 +142,7 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 			st.QuietEnd = atoiDefault(r.FormValue("quiet_end"), 0)
 			st.Concurrency = atoiDefault(r.FormValue("concurrency"), 1)
 			st.MetricsToken = strings.TrimSpace(r.FormValue("metrics_token"))
+			st.RequireGroup = strings.TrimSpace(r.FormValue("require_group"))
 			rn, _ := strconv.Atoi(r.FormValue("rn"))
 			st.Registries = st.Registries[:0]
 			for i := 0; i < rn; i++ {

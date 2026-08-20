@@ -42,6 +42,9 @@ type Config struct {
 	Projects       []Project
 	Password       string
 	ForwardHeader  string
+	// ForwardGroupsHeader carries the caller's groups from the reverse proxy, for the optional
+	// Settings group gate (Authentik sends X-authentik-groups, pipe-separated).
+	ForwardGroupsHeader string
 	NotifyWebhook  string
 	Snapshot       bool
 	Timeout        time.Duration
@@ -238,10 +241,46 @@ func (s *Server) user(r *http.Request) string {
 	return ""
 }
 
+// groupAllowed applies the optional "only this Authentik group may use Belay" gate.
+//
+// Forward-auth answers *who* the caller is; it says nothing about whether they should be here, so
+// without this any account the identity provider authenticates gets in. The gate reads the groups
+// header the proxy attaches and requires the configured one.
+//
+// It fails CLOSED: with a group required and no groups header present, access is denied. A missing
+// header is indistinguishable from a proxy that was never configured to send one, and treating
+// "I don't know your groups" as "you may pass" would make the gate ornamental. Password sessions
+// are exempt — that login is the local admin, and locking it out would leave no way back in if the
+// proxy is misconfigured.
+func (s *Server) groupAllowed(r *http.Request) bool {
+	want := strings.TrimSpace(s.set.Get().RequireGroup)
+	if want == "" || s.cfg.ForwardHeader == "" {
+		return true
+	}
+	if r.Header.Get(s.cfg.ForwardHeader) == "" {
+		return true // not a forward-auth identity (password session)
+	}
+	header := s.cfg.ForwardGroupsHeader
+	if header == "" {
+		header = "X-authentik-groups"
+	}
+	for _, g := range strings.FieldsFunc(r.Header.Get(header), func(c rune) bool { return c == '|' || c == ',' }) {
+		if strings.EqualFold(strings.TrimSpace(g), want) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.authEnabled() && s.user(r) == "" {
 			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		if !s.groupAllowed(r) {
+			http.Error(w, "forbidden: your account is not in the group required to use Belay",
+				http.StatusForbidden)
 			return
 		}
 		h(w, r)

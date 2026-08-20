@@ -65,6 +65,16 @@
     <input type="text" name="metrics_token" value="{{.S.MetricsToken}}" placeholder="a secret — then scrape /metrics?token=…">
   </label>
 
+  <label>Require SSO group <span class="muted small">(blank = any authenticated user)</span>
+    <input type="text" name="require_group" value="{{.S.RequireGroup}}" placeholder="e.g. belay-admins">
+  </label>
+  <p class="muted small">Forward-auth proves <b>who</b> you are, not whether you belong here — without
+  this, every account your identity provider authenticates can use Belay. Set a group name and only its
+  members get in, read from the groups header your proxy sends
+  (<code>X-authentik-groups</code> by default; override with <code>--forward-groups-header</code>).
+  <b>Fails closed:</b> if no groups header arrives, access is denied — so configure the proxy to send
+  one before setting this. The password login is exempt, so you keep a way back in.</p>
+
   <div class="actions">
     <button class="btn" type="submit">Save settings</button>
     <button class="btn ghost" type="button" hx-post="/settings/test" hx-target="#notify-test" hx-swap="innerHTML">Send test notification</button>

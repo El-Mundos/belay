@@ -13,11 +13,13 @@ import (
 	"github.com/El-Mundos/belay/internal/notify"
 	"github.com/El-Mundos/belay/internal/registry"
 	"github.com/El-Mundos/belay/internal/store"
+	"github.com/El-Mundos/belay/internal/version"
 )
 
 // agentConn is a connected remote agent: the stacks it reported and a queue of commands for it.
 type agentConn struct {
 	host     string
+	version  string // agent's build version ("" = predates the field)
 	projects []cluster.Project
 	lastSeen time.Time
 	queue    chan cluster.Command
@@ -51,6 +53,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		s.agents[reg.Host] = c
 	}
 	c.projects = reg.Projects
+	c.version = reg.Version
 	c.lastSeen = time.Now()
 	s.agentsMu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
@@ -118,6 +121,8 @@ type hostView struct {
 	Online   bool
 	Ago      string
 	Projects []cluster.Project
+	Version  string // agent build version ("" = older than the field)
+	Stale    bool   // differs from this server's version
 }
 
 func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +134,8 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 			Host: c.host, Online: online,
 			Ago:      time.Since(c.lastSeen).Round(time.Second).String(),
 			Projects: c.projects,
+			Version:  c.version,
+			Stale:    c.version != version.Version,
 		})
 	}
 	s.agentsMu.Unlock()

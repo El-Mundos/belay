@@ -60,6 +60,10 @@ func Open(path string) *Store {
 	return s
 }
 
+// persisted is the on-disk shape of store.json. The update history lives under "recs" (not
+// "records") and rollback points under "rollbacks" — worth stating, because reading the file with
+// the wrong key yields an empty list rather than an error, which reads as "belay has no history"
+// when in fact it has plenty.
 type persisted struct {
 	Seq       int                      `json:"seq"`
 	Recs      []Record                 `json:"recs"`
