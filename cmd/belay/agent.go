@@ -106,7 +106,7 @@ func runAgent(args []string) {
 			// result posted afterwards would never be sent.
 			res := cluster.Result{CommandID: cmd.ID, Host: host, Project: "belay-agent", Service: "agent",
 				From: version.Version, To: cmd.Image, Outcome: "updated", Duration: "-"}
-			if err := su.Apply(context.Background(), *dataDir, version.Version, 24*time.Hour); err != nil {
+			if err := su.Apply(context.Background(), selfupdate.Opts{Dir: *dataDir, FromVersion: version.Version, Window: 24 * time.Hour}); err != nil {
 				res.Outcome, res.Err = "error", err.Error()
 				log.Printf("self-update: %v", err)
 			} else {

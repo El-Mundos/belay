@@ -215,9 +215,18 @@ const helperName = "belay-selfupdate"
 // the only thing a manual rollback can go back to.
 const previousTag = "belay:previous"
 
+// Opts configures an update. Grouped rather than passed positionally because two of these are
+// strings whose order nobody would remember.
+type Opts struct {
+	Dir         string        // data directory holding the journal ("" = no journal, no reporting)
+	FromVersion string        // the version we are leaving, recorded for History and rollback
+	Window      time.Duration // how long a manual rollback stays on offer
+	FollowUp    string        // work to run after this update is confirmed healthy
+}
+
 // Apply replaces Belay with the current image tag. See applyImage.
-func (m *Manager) Apply(ctx context.Context, dir string, fromVersion string, window time.Duration) error {
-	return m.applyImage(ctx, dir, m.image, fromVersion, window, true)
+func (m *Manager) Apply(ctx context.Context, o Opts) error {
+	return m.applyImage(ctx, o, m.image, true)
 }
 
 // Rollback undoes a completed self-update, putting back the image Belay was running before it.
@@ -244,7 +253,8 @@ func (m *Manager) Rollback(ctx context.Context, dir string) error {
 	if err := runDocker(ctx, "tag", rb.Image, m.image); err != nil {
 		return fmt.Errorf("re-tag previous image: %w", err)
 	}
-	return m.applyImage(ctx, dir, m.image, rb.Version, rb.Until.Sub(time.Now()), false)
+	// A rollback carries no follow-up: the point is to stop, not to continue a rollout.
+	return m.applyImage(ctx, Opts{Dir: dir, FromVersion: rb.Version, Window: time.Until(rb.Until)}, m.image, false)
 }
 
 // applyImage recreates Belay's container onto target, handing off to a helper that outlives this
@@ -252,7 +262,8 @@ func (m *Manager) Rollback(ctx context.Context, dir string) error {
 //
 // dir is the data directory holding the journal (see journal.go); passing "" runs without one,
 // which still updates but leaves nobody able to report what happened if it goes wrong.
-func (m *Manager) applyImage(ctx context.Context, dir, target, fromVersion string, window time.Duration, pull bool) error {
+func (m *Manager) applyImage(ctx context.Context, o Opts, target string, pull bool) error {
+	dir := o.Dir
 	if !m.Enabled() {
 		return fmt.Errorf("self-update not available (not running in a detectable container)")
 	}
@@ -276,8 +287,8 @@ func (m *Manager) applyImage(ctx context.Context, dir, target, fromVersion strin
 	backup := m.container + "-previous"
 	if err := saveState(dir, State{
 		Phase: PhaseApplying, Container: m.container, Backup: backup,
-		FromImage: runningID, FromVersion: fromVersion, ToImage: target,
-		Window: window, Started: time.Now(),
+		FromImage: runningID, FromVersion: o.FromVersion, ToImage: target,
+		Window: o.Window, FollowUp: o.FollowUp, Started: time.Now(),
 	}); err != nil {
 		return fmt.Errorf("write self-update journal: %w", err)
 	}

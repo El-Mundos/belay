@@ -9,12 +9,14 @@
 <div class="toolbar">
   <button class="btn ghost" hx-post="/hosts/check-all" hx-target="#host-cards" hx-select="#host-cards"
           hx-swap="outerHTML">Check all for updates</button>
-  {{if .StaleAgents}}
-    <button class="btn" hx-post="/agents/update-all" hx-target="#host-cards" hx-select="#host-cards"
+  {{if .UpdateAllCount}}
+    {{/* One button for the whole fleet, in a deliberate order: Belay is the canary. */}}
+    <button class="btn" hx-post="/update-everything" hx-target="#host-cards" hx-select="#host-cards"
             hx-swap="outerHTML"
-            hx-confirm="Update {{.StaleAgents}} agent(s) to v{{.Version}}? Each hands off to a helper on its own host and re-registers on the new image. This host is not included — update it from its own card."
-            data-ok-label="Update {{.StaleAgents}} agent(s)">⬆ Update all agents ({{.StaleAgents}})</button>
+            hx-confirm="Update everything to v{{.Version}}?{{if .ServerStale}} Belay updates itself first and only rolls the agents out once it comes back and stays healthy — if its own update fails, the agents are left alone.{{end}} Agents then update one at a time, and the rollout stops at the first one that does not come back."
+            data-ok-label="Update everything">⬆ Update everything ({{.UpdateAllCount}})</button>
   {{end}}
+  {{if .Rollout}}<span class="muted small">⟳ fleet rollout in progress — agents update one at a time</span>{{end}}
 </div>
 
 {{/* Hosts refreshes on the same no-churn poll as the other lists: an agent that finishes

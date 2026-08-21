@@ -308,6 +308,17 @@ func (s *Server) reconcileSelfUpdate() {
 			})
 		}
 	}
+	// The previous process asked for the fleet to follow. Only now — with this Belay booted on the
+	// new image — is that request worth acting on, and only after the gate window, so an image that
+	// cannot stay up never gets to tell three other hosts to install it.
+	if out.Kind == "updated" && out.FollowUp == followUpAgents {
+		log.Printf("self-update: fleet rollout queued, starting in %s", selfupdate.GateWindow)
+		go func() {
+			time.Sleep(selfupdate.GateWindow)
+			s.fleetRollout()
+		}()
+	}
+
 	// The predecessor container is the rollback target; it may only be discarded once the helper's
 	// gate window has passed, or we would destroy the way back while a rollback is still possible.
 	if out.ReapAfter != "" {
@@ -494,6 +505,138 @@ func (s *Server) handleHostsCheckAll(w http.ResponseWriter, r *http.Request) {
 	s.handleHosts(w, r) // htmx picks #host-cards out of the re-rendered page
 }
 
+// followUpAgents is the FollowUp token meaning "roll the agents once this update is confirmed".
+const followUpAgents = "agents"
+
+// agentWaitTimeout is how long one agent gets to come back on the new version before the rollout
+// gives up. An agent that has not re-registered by then either failed or rolled itself back; either
+// way the release is not proven, and the rest of the fleet should be left alone.
+const agentWaitTimeout = 3 * time.Minute
+
+// handleUpdateEverything updates Belay first and the agents afterwards.
+//
+// The order is the whole point. Belay is the canary: it runs on the machine you can actually reach,
+// its update is health-gated and reversible, and if the new image is bad it rolls itself back and
+// the agents are never told to do anything. Updating everything at once would instead take down the
+// only observer at the moment N remote hosts start replacing themselves -- and an agent posts its
+// result BEFORE it hands off, so a server mid-restart loses exactly the reports it would need.
+func (s *Server) handleUpdateEverything(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	serverStale := s.suAvail
+	s.mu.Unlock()
+
+	if serverStale && s.su != nil && s.su.Enabled() {
+		// Write the intention down before going down: this process will not be here to continue.
+		err := s.su.Apply(r.Context(), selfupdate.Opts{
+			Dir: s.cfg.DataDir, FromVersion: version.Version,
+			Window: s.rollbackWindow(), FollowUp: followUpAgents,
+		})
+		if err != nil {
+			http.Error(w, "self-update failed to launch: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.writeReconnectPage(w, "Belay is updating itself…",
+			"The agents follow once this Belay comes back and proves healthy. This page reconnects in ~15s.")
+		return
+	}
+	// Belay is already current, so the canary step is already satisfied.
+	go s.fleetRollout()
+	s.handleHosts(w, r)
+}
+
+// fleetRollout updates stale agents ONE AT A TIME, stopping at the first that does not come back.
+//
+// Sequential is not politeness, it is the safety property: a release that breaks agents costs one
+// agent, on one host, instead of the entire fleet at once -- and the surviving agents are the
+// evidence for what went wrong.
+func (s *Server) fleetRollout() {
+	if !s.rolloutStart() {
+		return // one at a time; a second rollout would fight the first over the same agents
+	}
+	defer s.rolloutDone()
+
+	for {
+		c := s.nextStaleAgent()
+		if c == nil {
+			return
+		}
+		cmd := cluster.Command{ID: newToken()[:12], Kind: cluster.KindSelf, Image: s.su.Image()}
+		select {
+		case c.queue <- cmd:
+			s.jobs.startRemote(c.host, "belay-agent", "agent", s.su.Image(), cmd.ID)
+		default:
+			log.Printf("fleet: %s queue full, stopping rollout", c.host)
+			return
+		}
+		if s.waitForAgent(c.host, version.Version, agentWaitTimeout) {
+			log.Printf("fleet: %s is now on %s", c.host, version.Version)
+			continue
+		}
+		// It never came back on the new version. Record it where a failure belongs and STOP.
+		errStr := "agent did not re-register on v" + version.Version + " within " + agentWaitTimeout.String() +
+			" — fleet rollout stopped so the rest keep the version they have"
+		log.Printf("fleet: %s: %s", c.host, errStr)
+		s.store.Add(store.Record{
+			Project: c.host + "/belay-agent", Service: "agent", From: c.version, To: s.su.Image(),
+			Outcome: "error", Err: errStr, Duration: agentWaitTimeout.String(),
+		})
+		s.notify.Failure(notify.Event{
+			Project: c.host + "/belay-agent", Service: "agent", From: c.version,
+			To: s.su.Image(), Outcome: "error", Error: errStr,
+		})
+		return
+	}
+}
+
+// nextStaleAgent returns an online agent behind the server, or nil when the fleet is level.
+func (s *Server) nextStaleAgent() *agentConn {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	for _, c := range s.agents {
+		if c.version != version.Version && time.Since(c.lastSeen) < 90*time.Second {
+			return c
+		}
+	}
+	return nil
+}
+
+// waitForAgent blocks until a host re-registers reporting want, or the timeout passes. The agent's
+// posted result is not the signal — it reports "helper launched" and then dies — so the only honest
+// evidence that an agent survived its own update is that it came back and said what it is now.
+func (s *Server) waitForAgent(host, want string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		s.agentsMu.Lock()
+		c := s.agents[host]
+		got := ""
+		if c != nil {
+			got = c.version
+		}
+		s.agentsMu.Unlock()
+		if got == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) rolloutStart() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rollout {
+		return false
+	}
+	s.rollout = true
+	return true
+}
+
+func (s *Server) rolloutDone() {
+	s.mu.Lock()
+	s.rollout = false
+	s.mu.Unlock()
+}
+
 // handleAgentsUpdateAll updates every agent that is behind.
 //
 // The SERVER is deliberately excluded. Its update tears down the page issuing the request, and a
@@ -530,7 +673,8 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "self-update not available (belay is not running in a detectable container)", http.StatusBadRequest)
 		return
 	}
-	if err := s.su.Apply(r.Context(), s.cfg.DataDir, version.Version, s.rollbackWindow()); err != nil {
+	if err := s.su.Apply(r.Context(), selfupdate.Opts{Dir: s.cfg.DataDir, FromVersion: version.Version,
+		Window: s.rollbackWindow(), FollowUp: r.FormValue("then")}); err != nil {
 		http.Error(w, "self-update failed to launch: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

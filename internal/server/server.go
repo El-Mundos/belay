@@ -73,6 +73,7 @@ type Server struct {
 	hostName  string                 // the machine Belay manages (not this container's id)
 	suAvail   bool                   // cached: a newer belay image is available
 	suVersion string                 // cached: the version that newer image reports
+	rollout   bool                   // a sequential fleet rollout is in progress
 
 	dockerCfgDir string // DOCKER_CONFIG dir holding generated auths for private-registry pulls
 
@@ -229,6 +230,7 @@ func (s *Server) Run() error {
 	mux.HandleFunc("POST /host-check", s.guard(s.handleHostCheck))
 	mux.HandleFunc("POST /hosts/check-all", s.guard(s.handleHostsCheckAll))
 	mux.HandleFunc("POST /agents/update-all", s.guard(s.handleAgentsUpdateAll))
+	mux.HandleFunc("POST /update-everything", s.guard(s.handleUpdateEverything))
 	mux.HandleFunc("POST /self-rollback", s.guard(s.handleSelfRollback))
 	mux.HandleFunc("GET /hosts", s.guard(s.handleHosts))
 	mux.HandleFunc("POST /remote-update", s.guard(s.handleRemoteUpdate))

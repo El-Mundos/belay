@@ -153,9 +153,12 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	for i := range hosts {
 		hosts[i].Idx = i
 	}
-	stale := 0
+	stale, serverStale := 0, false
 	for _, h := range hosts {
-		if !h.Local && h.Stale {
+		switch {
+		case h.Local:
+			serverStale = h.Stale
+		case h.Stale:
 			stale++
 		}
 	}
@@ -163,6 +166,11 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	data["Hosts"] = hosts
 	data["Rev"] = hostsRev(hosts)
 	data["StaleAgents"] = stale
+	data["ServerStale"] = serverStale
+	data["UpdateAllCount"] = stale + map[bool]int{true: 1, false: 0}[serverStale]
+	s.mu.Lock()
+	data["Rollout"] = s.rollout
+	s.mu.Unlock()
 	data["AgentsEnabled"] = s.agentsEnabled()
 	s.render(w, "hosts", data)
 }

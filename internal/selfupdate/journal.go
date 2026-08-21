@@ -47,6 +47,12 @@ type State struct {
 	Window      time.Duration `json:"window"`       // how long a manual rollback stays offered
 	Started     time.Time     `json:"started"`
 
+	// FollowUp is work the caller asked to happen AFTER this update succeeds. It lives in the
+	// journal because the process that asked for it is the process being replaced -- the only way
+	// to carry an intention across a self-update is to write it down somewhere that outlives the
+	// container. Opaque here on purpose: this package has no business knowing what agents are.
+	FollowUp string `json:"follow_up,omitempty"`
+
 	// Rollback outlives the update itself: it is what a MANUAL rollback needs, hours later, once
 	// the previous container has been reaped and the tag has moved off the previous image.
 	Rollback *RollbackPoint `json:"rollback,omitempty"`
@@ -127,6 +133,7 @@ type Outcome struct {
 	From, To  string
 	Detail    string
 	ReapAfter string // container to remove once the helper's gate window has passed ("" = none)
+	FollowUp  string // work the previous process asked to run if this update succeeded
 }
 
 // Reconcile inspects the journal against reality and reports what became of an in-flight update.
@@ -166,7 +173,7 @@ func (m *Manager) Reconcile(ctx context.Context, dir string) Outcome {
 		}
 		saveState(dir, next)
 		return Outcome{Kind: "updated", From: st.fromLabel(), To: st.ToImage,
-			Detail: "Belay restarted on the new image", ReapAfter: st.Backup}
+			Detail: "Belay restarted on the new image", ReapAfter: st.Backup, FollowUp: st.FollowUp}
 
 	case st.Phase == PhaseApplying && isOld:
 		// The helper never got the new container running — it died mid-flight, or the new image
