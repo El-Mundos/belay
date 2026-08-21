@@ -38,7 +38,7 @@ func TestRecreateScript(t *testing.T) {
 	if err := json.Unmarshal([]byte(sample), &docs); err != nil {
 		t.Fatal(err)
 	}
-	s := recreateScript(docs[0], "belay-previous", docs[0].Config.Image, true)
+	s := recreateScript(docs[0], "belay-previous", docs[0].Config.Image, true, "")
 
 	must := []string{
 		"docker run -d --name belay",
@@ -69,7 +69,7 @@ func TestRecreateScript_ReadOnlyMount(t *testing.T) {
 		Type, Name, Source, Destination string
 		RW                              bool
 	}{Type: "bind", Source: "/etc/x", Destination: "/etc/x", RW: false})
-	if !strings.Contains(recreateScript(d, "x-previous", d.Config.Image, true), "-v /etc/x:/etc/x:ro") {
+	if !strings.Contains(recreateScript(d, "x-previous", d.Config.Image, true, ""), "-v /etc/x:/etc/x:ro") {
 		t.Error("read-only bind not rendered with :ro")
 	}
 }

@@ -21,6 +21,7 @@ type Job struct {
 	Phase            string // live sub-status while running (snapshotting / pulling / health-checking…)
 	Logs             string
 	CmdID            string // remote command id, to correlate the agent's result back to this job
+	Self             bool   // a Belay replacing its OWN container, not a service (see awaitRestart)
 	Started, Ended   time.Time
 }
 
@@ -108,6 +109,58 @@ func (m *jobManager) startRemote(host, project, service, to, cmdID string) {
 		m.jobs = m.jobs[len(m.jobs)-m.max:]
 	}
 	m.byCmd[cmdID] = j
+}
+
+// startSelf records THIS Belay replacing its own container.
+//
+// The job cannot outlive a successful update — the process holding it is the one being replaced — so
+// it is really an entry that only persists when something goes wrong. That is the point: a
+// self-update that fails to happen used to produce nothing anywhere, and the tray is the first place
+// anyone looks after pressing a button.
+func (m *jobManager) startSelf(from, to string) *Job {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.seq++
+	j := &Job{ID: m.seq, Project: SelfUpdateProject, Service: SelfUpdateService, From: from, To: to,
+		State: "running", Phase: "handing off to helper…", Self: true, Started: time.Now()}
+	m.jobs = append(m.jobs, j)
+	if len(m.jobs) > m.max {
+		m.jobs = m.jobs[len(m.jobs)-m.max:]
+	}
+	return j
+}
+
+// startRemoteSelf records an AGENT replacing its own container, marked so its result is not mistaken
+// for the end of the work (see awaitRestart).
+func (m *jobManager) startRemoteSelf(host, to, cmdID string) {
+	m.startRemote(host, "belay-agent", "agent", to, cmdID)
+	m.mu.Lock()
+	if j := m.byCmd[cmdID]; j != nil {
+		j.Self = true
+	}
+	m.mu.Unlock()
+}
+
+// awaitRestart handles the agent result for a self-update, reporting whether the job should now WAIT
+// rather than finish.
+//
+// An agent updating itself posts its result BEFORE applying, because the helper kills it and a result
+// sent afterwards would never arrive. So "success" here means "helper launched", not "the agent is
+// back on the new version" — and the tray was showing such a job as finished, updated, while the
+// agent had not even restarted yet. The fleet rollout already knew better and waited for the agent to
+// re-register; the tray did not, so the two disagreed about the same event.
+//
+// A FAILED result is different: it is final, the agent is still alive to have sent it, and there is
+// nothing to wait for. Only success defers.
+func (m *jobManager) awaitRestart(cmdID, state string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j := m.byCmd[cmdID]
+	if j == nil || !j.Self || state != "updated" {
+		return false
+	}
+	j.Phase = "restarting on the new image…"
+	return true
 }
 
 // finishCmd completes the remote job matching an agent result.

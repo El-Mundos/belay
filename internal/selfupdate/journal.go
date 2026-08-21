@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -194,6 +195,55 @@ func (m *Manager) Reconcile(ctx context.Context, dir string) Outcome {
 		settle(dir, st)
 		return Outcome{ReapAfter: st.Backup}
 	}
+}
+
+// Stalled reports an update that was launched but never happened: the journal still says a helper is
+// in flight, and we are still the image we were before it started.
+//
+// Reconcile answers the same question, but only at STARTUP — which is exactly the case a failed swap
+// never reaches. If the helper cannot touch Belay's container at all (it dies immediately, or comes
+// up unable to reach Docker), the old process just keeps running: it is never replaced, so it never
+// restarts, so nothing ever reads the journal. The update then fails in complete silence — no
+// History row, no Failed card, no notification — and the only symptom is that Belay is still on the
+// old version. This is the check that closes that hole, run by the process that ordered the update
+// once enough time has passed that a working helper would have finished.
+//
+// It deliberately reuses Reconcile's test (are we still FromImage?) rather than inspecting the
+// helper: a helper that exited 0 having done nothing is indistinguishable from one that crashed, and
+// what matters is the outcome, not the corpse.
+func (m *Manager) Stalled(ctx context.Context, dir string) (State, bool) {
+	st := LoadState(dir)
+	if st.Phase != PhaseApplying || !m.Enabled() {
+		return State{}, false
+	}
+	running, err := dockerOut(ctx, "inspect", m.container, "--format", "{{.Image}}")
+	if err != nil || running != st.FromImage {
+		// Either we cannot tell which image we are, or we are the new one — in which case the swap
+		// worked and this process is about to be torn down anyway. Judge nothing.
+		return State{}, false
+	}
+	return st, true
+}
+
+// HelperLog returns the tail of the helper container's output, which is where the actual reason a
+// self-update failed is written — and nowhere else. Without it a stalled update can only be reported
+// as "it did not take", which tells the user nothing they had not already noticed.
+func (m *Manager) HelperLog(ctx context.Context) string {
+	out, err := exec.CommandContext(ctx, "docker", "logs", "--tail", "20", helperName).CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Abandon ends an update that never happened, clearing the journal so the next attempt starts from a
+// clean slate, and removing the spent helper. A journal left at PhaseApplying makes every later
+// Stalled check re-report the same dead update, and a helper still holding the fixed name would be
+// force-removed by the next Apply anyway — reaping it here just means the host is not left with an
+// Exited container implying work is in flight.
+func (m *Manager) Abandon(ctx context.Context, dir string) {
+	settle(dir, LoadState(dir))
+	_ = runDocker(ctx, "rm", "-f", helperName)
 }
 
 // Reap removes a container left behind as rollback material. Called once the helper's gate window

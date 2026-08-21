@@ -331,6 +331,60 @@ func (s *Server) reconcileSelfUpdate() {
 	}
 }
 
+// selfUpdateGrace is how long the watchdog waits before declaring a self-update stalled. The helper
+// sleeps 3s, pulls, swaps, then holds the gate window open — so a working one has replaced us well
+// before this. Generous on purpose: the cost of waiting is a late report, while the cost of being
+// hasty is calling a slow-but-successful update a failure.
+const selfUpdateGrace = selfupdate.GateWindow + 90*time.Second
+
+// watchSelfUpdate reports a self-update that never happened.
+//
+// Every other update in Belay is supervised by the process that started it. A self-update is the one
+// that is not: the process ordering it expects to be destroyed, so it deliberately returns as soon as
+// the helper is launched and lets the NEXT Belay explain the outcome via the journal (see
+// reconcileSelfUpdate). That reasoning has a hole in it, and the hole is the case where the helper
+// never manages to touch Belay at all — it cannot reach Docker, or it dies on startup. Then there is
+// no next Belay: this process keeps serving, nothing restarts, nothing reads the journal, and the
+// update fails with no History row, no Failed card and no notification. The user presses Update,
+// waits, and finds Belay still on the old version with nowhere to look.
+//
+// So: if we are still alive and still ourselves once a working helper would long since have finished,
+// the helper failed, and we are the only process left able to say so.
+func (s *Server) watchSelfUpdate(job *Job) {
+	time.Sleep(selfUpdateGrace)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	st, stalled := s.su.Stalled(ctx, s.cfg.DataDir)
+	if !stalled {
+		return
+	}
+	detail := "self-update did not take: the helper container never replaced Belay, so it is still " +
+		"running the previous image"
+	if lg := s.su.HelperLog(ctx); lg != "" {
+		detail += "\n\nhelper output:\n" + lg
+	}
+	from, to := st.FromVersion, st.ToImage
+	if from == "" {
+		from = shortID(st.FromImage)
+	}
+	s.store.Add(store.Record{
+		Project: SelfUpdateProject, Service: SelfUpdateService, From: from, To: to,
+		Outcome: "error", Err: detail, Duration: "-",
+	})
+	s.notify.Failure(notify.Event{
+		Project: SelfUpdateProject, Service: SelfUpdateService, From: from, To: to,
+		Outcome: "error", Error: detail,
+	})
+	if job != nil {
+		s.jobs.finish(job, "error", detail)
+	}
+	log.Printf("self-update: stalled — %s", detail)
+	// Clear the journal and reap the spent helper, so the next attempt starts clean rather than
+	// inheriting a phase that says an update is still in flight.
+	s.su.Abandon(ctx, s.cfg.DataDir)
+}
+
 // outcomeErr is the explanation stored with a non-successful self-update ("" when it worked).
 func outcomeErr(o selfupdate.Outcome) string {
 	if o.Kind == "updated" {
@@ -370,7 +424,7 @@ func (s *Server) handleAgentSelfUpdate(w http.ResponseWriter, r *http.Request) {
 	select {
 	case c.queue <- cmd:
 		// Same treatment as any other remote update, so it is visible while it happens.
-		s.jobs.startRemote(host, "belay-agent", "agent", s.su.Image(), cmd.ID)
+		s.jobs.startRemoteSelf(host, s.su.Image(), cmd.ID)
 		fmt.Fprint(w, `<span class="ok">queued — see Activity; the agent re-registers on the new image</span>`)
 	default:
 		fmt.Fprint(w, `<span class="err">agent queue full</span>`)
@@ -527,14 +581,18 @@ func (s *Server) handleUpdateEverything(w http.ResponseWriter, r *http.Request) 
 
 	if serverStale && s.su != nil && s.su.Enabled() {
 		// Write the intention down before going down: this process will not be here to continue.
+		job := s.jobs.startSelf(version.Version, s.su.Image())
 		err := s.su.Apply(r.Context(), selfupdate.Opts{
 			Dir: s.cfg.DataDir, FromVersion: version.Version,
 			Window: s.rollbackWindow(), FollowUp: followUpAgents,
 		})
 		if err != nil {
+			s.jobs.finish(job, "error", err.Error())
 			http.Error(w, "self-update failed to launch: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// The canary failing silently would strand the whole fleet rollout with no explanation.
+		go s.watchSelfUpdate(job)
 		s.writeReconnectPage(w, "Belay is updating itself…",
 			"The agents follow once this Belay comes back and proves healthy. This page reconnects in ~15s.")
 		return
@@ -563,7 +621,7 @@ func (s *Server) fleetRollout() {
 		cmd := cluster.Command{ID: newToken()[:12], Kind: cluster.KindSelf, Image: s.su.Image()}
 		select {
 		case c.queue <- cmd:
-			s.jobs.startRemote(c.host, "belay-agent", "agent", s.su.Image(), cmd.ID)
+			s.jobs.startRemoteSelf(c.host, s.su.Image(), cmd.ID)
 		default:
 			log.Printf("fleet: %s queue full, stopping rollout", c.host)
 			return
@@ -657,7 +715,7 @@ func (s *Server) handleAgentsUpdateAll(w http.ResponseWriter, r *http.Request) {
 		cmd := cluster.Command{ID: newToken()[:12], Kind: cluster.KindSelf, Image: s.su.Image()}
 		select {
 		case c.queue <- cmd:
-			s.jobs.startRemote(c.host, "belay-agent", "agent", s.su.Image(), cmd.ID)
+			s.jobs.startRemoteSelf(c.host, s.su.Image(), cmd.ID)
 			queued++
 		default:
 		}
@@ -673,11 +731,17 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "self-update not available (belay is not running in a detectable container)", http.StatusBadRequest)
 		return
 	}
+	// A job for Belay's own update. It lives in THIS process, so it survives exactly as long as the
+	// update fails to happen — which is precisely when someone is looking for it. A successful
+	// update takes the job down with the container, and the new Belay reports it from the journal.
+	job := s.jobs.startSelf(version.Version, s.su.Image())
 	if err := s.su.Apply(r.Context(), selfupdate.Opts{Dir: s.cfg.DataDir, FromVersion: version.Version,
 		Window: s.rollbackWindow(), FollowUp: r.FormValue("then")}); err != nil {
+		s.jobs.finish(job, "error", err.Error())
 		http.Error(w, "self-update failed to launch: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	go s.watchSelfUpdate(job)
 	s.writeReconnectPage(w, "Belay is updating itself…",
 		"The container is being recreated on the new image. This page will reconnect in ~15s.")
 }

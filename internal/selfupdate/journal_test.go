@@ -51,7 +51,7 @@ func script(t *testing.T) string {
 	if err := json.Unmarshal([]byte(sample), &docs); err != nil {
 		t.Fatal(err)
 	}
-	return recreateScript(docs[0], "belay-previous", docs[0].Config.Image, true)
+	return recreateScript(docs[0], "belay-previous", docs[0].Config.Image, true, "")
 }
 
 // --- journal reconciliation -------------------------------------------------------------------
@@ -131,7 +131,7 @@ func TestRecreateScript_RollbackDoesNotPull(t *testing.T) {
 	if err := json.Unmarshal([]byte(sample), &docs); err != nil {
 		t.Fatal(err)
 	}
-	s := recreateScript(docs[0], "belay-previous", "belay:latest", false)
+	s := recreateScript(docs[0], "belay-previous", "belay:latest", false, "")
 	if strings.Contains(s, "docker pull") {
 		t.Errorf("rollback script pulls, which would fetch the image it is rolling back from:\n%s", s)
 	}

@@ -114,8 +114,29 @@ func (s *Server) handleAgentResult(w http.ResponseWriter, r *http.Request) {
 	case "updated":
 		s.notify.Success(label, res.Service, res.From, res.To)
 	}
-	s.jobs.finishCmd(res.CommandID, res.Outcome, res.From, res.To, res.Logs) // complete the Activity job
+	// An agent's self-update reports "helper launched", not "done" — so hold the job open and let the
+	// agent's own re-registration close it. Everything else is complete on arrival.
+	if s.jobs.awaitRestart(res.CommandID, res.Outcome) {
+		go s.finishAgentSelf(res.Host, res.CommandID)
+	} else {
+		s.jobs.finishCmd(res.CommandID, res.Outcome, res.From, res.To, res.Logs) // complete the Activity job
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// finishAgentSelf closes a held-open agent self-update job once the agent proves it came back.
+//
+// It reuses the fleet rollout's completion signal — re-registration on the wanted version — so the
+// tray and the rollout now agree about when an agent update is actually done, instead of the tray
+// claiming success roughly three minutes early.
+func (s *Server) finishAgentSelf(host, cmdID string) {
+	if s.waitForAgent(host, version.Version, agentWaitTimeout) {
+		s.jobs.finishCmd(cmdID, "updated", "", "v"+version.Version, "")
+		return
+	}
+	s.jobs.finishCmd(cmdID, "error", "", "",
+		"the agent did not come back on v"+version.Version+" within "+agentWaitTimeout.String()+
+			" — it may still be restarting, or its helper failed; check the Hosts tab")
 }
 
 // ---- UI: Hosts tab ----

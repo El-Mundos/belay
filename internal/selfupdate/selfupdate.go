@@ -20,10 +20,10 @@ import (
 
 // Manager performs self-update for the belay container it is running inside.
 type Manager struct {
-	container  string // own container name (no leading slash)
-	image      string // own image ref, e.g. "belay:latest"
-	network    string // first docker network (helper joins it to reach the socket-proxy)
-	dockerHost string // DOCKER_HOST from own env ("" => use the mounted /var/run/docker.sock)
+	container  string   // own container name (no leading slash)
+	image      string   // own image ref, e.g. "belay:latest"
+	networks   []string // every docker network Belay is attached to, sorted (see helperNetwork)
+	dockerHost string   // DOCKER_HOST from own env ("" => use the mounted /var/run/docker.sock)
 }
 
 // inspectDoc is the subset of `docker inspect` we need to faithfully recreate the container.
@@ -72,10 +72,7 @@ func Detect(ctx context.Context) *Manager {
 		container: strings.TrimPrefix(d.Name, "/"),
 		image:     d.Config.Image,
 	}
-	for name := range d.NetworkSettings.Networks {
-		m.network = name
-		break
-	}
+	m.networks = sortedNetworks(d)
 	for _, e := range d.Config.Env {
 		if strings.HasPrefix(e, "DOCKER_HOST=") {
 			m.dockerHost = strings.TrimPrefix(e, "DOCKER_HOST=")
@@ -146,6 +143,61 @@ func (m *Manager) Protects(service, image string) string {
 		return "Belay reaches Docker through this service — recreating it would cut the connection mid-update"
 	}
 	return ""
+}
+
+// sortedNetworks lists a container's networks in a stable order. Go randomises map iteration, and
+// every use of this set here feeds something that must not change shape between runs.
+func sortedNetworks(d inspectDoc) []string {
+	out := make([]string, 0, len(d.NetworkSettings.Networks))
+	for n := range d.NetworkSettings.Networks {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// helperNetwork picks the ONE network the helper container must join in order to reach Docker.
+//
+// This is not a cosmetic choice. Belay routinely sits on several networks at once — an internal one
+// carrying its socket-proxy, plus a proxy network for Traefik, plus whatever else it was joined to
+// for notifications — and only ONE of them can resolve DOCKER_HOST. A helper launched on any of the
+// others comes up unable to resolve its transport, so every docker command it runs fails with
+// "lookup belay-sockproxy on 127.0.0.11:53: no such host", the swap never happens, and Belay simply
+// keeps running the old image.
+//
+// The previous implementation took whatever name Go's randomised map iteration yielded first, which
+// made self-update a dice roll whose odds were 1/len(networks). It presented as flakiness — some
+// updates worked, some silently did nothing — rather than as the deterministic bug it was.
+//
+// So ask the transport itself which networks it is on and take the overlap, rather than guessing.
+// nets must already be sorted, so that the fallback (and therefore the failure) is at least
+// reproducible.
+func (m *Manager) helperNetwork(ctx context.Context, nets []string) string {
+	if m.dockerHost == "" {
+		return "" // the socket is bind-mounted into the helper instead; no network needed
+	}
+	if len(nets) == 0 {
+		return ""
+	}
+	if host := dockerHostName(m.dockerHost); host != "" {
+		out, err := dockerOut(ctx, "inspect", host, "--format",
+			`{{range $n, $v := .NetworkSettings.Networks}}{{$n}} {{end}}`)
+		if err == nil {
+			on := make(map[string]bool, 4)
+			for _, n := range strings.Fields(out) {
+				on[n] = true
+			}
+			for _, n := range nets {
+				if on[n] {
+					return n
+				}
+			}
+		}
+	}
+	// DOCKER_HOST names something we cannot inspect (an IP, a host outside Docker, a stopped
+	// proxy). A single sorted choice is still better than a random one: if it is wrong, it is
+	// wrong the same way every time, which is what makes it diagnosable.
+	return nets[0]
 }
 
 // dockerHostName pulls the container name out of a DOCKER_HOST like "tcp://belay-sockproxy:2375".
@@ -292,7 +344,11 @@ func (m *Manager) applyImage(ctx context.Context, o Opts, target string, pull bo
 	}); err != nil {
 		return fmt.Errorf("write self-update journal: %w", err)
 	}
-	script := recreateScript(docs[0], backup, target, pull)
+	// The network that reaches Docker, chosen once and used for BOTH the helper and the Belay it
+	// recreates: the new container is only on its primary network until the helper connects the
+	// rest, so starting it anywhere else means booting blind to its own transport.
+	net := m.helperNetwork(ctx, sortedNetworks(docs[0]))
+	script := recreateScript(docs[0], backup, target, pull, net)
 
 	// A leftover helper from a previous attempt would hold the name; it has already finished.
 	_ = runDocker(ctx, "rm", "-f", helperName)
@@ -302,8 +358,8 @@ func (m *Manager) applyImage(ctx context.Context, o Opts, target string, pull bo
 	// between removing the old container and starting the new one left nothing running and nothing
 	// that would ever retry.
 	args := []string{"run", "-d", "--name", helperName, "--restart", "on-failure:5"}
-	if m.network != "" {
-		args = append(args, "--network", m.network)
+	if net != "" {
+		args = append(args, "--network", net)
 	}
 	if m.dockerHost != "" {
 		args = append(args, "-e", "DOCKER_HOST="+m.dockerHost)
@@ -335,7 +391,10 @@ func (m *Manager) applyImage(ctx context.Context, o Opts, target string, pull bo
 // pull controls whether the helper refreshes the image first. An update must (the whole point is
 // to fetch a newer build); a rollback must NOT, because the tag has deliberately been re-pointed at
 // the older image locally and pulling would undo that immediately.
-func recreateScript(d inspectDoc, backup, image string, pull bool) string {
+//
+// primary is the network the new container starts on (see helperNetwork); the remaining networks
+// are connected immediately afterwards. "" falls back to the first sorted network.
+func recreateScript(d inspectDoc, backup, image string, pull bool, primary string) string {
 	name := strings.TrimPrefix(d.Name, "/")
 
 	run := []string{"docker", "run", "-d", "--name", name}
@@ -374,13 +433,16 @@ func recreateScript(d inspectDoc, backup, image string, pull bool) string {
 			run = append(run, "-p", hostpart+":"+cp)
 		}
 	}
-	// first network on `run`, the rest connected afterwards
-	var first string
+	// Primary network on `run`, the rest connected afterwards. Sorted rather than map-ordered so the
+	// generated script is deterministic — the same property sortedKeys gives the labels.
+	nets := sortedNetworks(d)
+	first := primary
+	if first == "" && len(nets) > 0 {
+		first = nets[0]
+	}
 	var rest []string
-	for n := range d.NetworkSettings.Networks {
-		if first == "" {
-			first = n
-		} else {
+	for _, n := range nets {
+		if n != first {
 			rest = append(rest, n)
 		}
 	}
