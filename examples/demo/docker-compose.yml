@@ -1,7 +1,7 @@
 # demo stack (old pins so updates show) — nothing here is running; it's just for viewing the UI
 services:
   traefik:
-    image: traefik:v3.0.0
+    image: traefik:3.7.11
   grafana:
     image: grafana/grafana-oss:11.0.0
   prometheus:
