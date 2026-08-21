@@ -85,3 +85,39 @@ func TestListRev_ChangesOnlyWhenTheListDoes(t *testing.T) {
 		t.Error("rollback availability changed; the list must swap")
 	}
 }
+
+// A compose interpolation failure is about Belay's environment, not the stack: the same file works
+// when the deploy wrapper supplies the variable. The raw compose error does not say that.
+func TestEnvCaveat(t *testing.T) {
+	real := `docker [compose -f /srv/infra/kalos-cobra/docker-compose.yml up -d --pull always db]: ` +
+		`exit status 15: error while interpolating services.db.environment.POSTGRES_PASSWORD: ` +
+		`required variable POSTGRES_PASSWORD is missing a value: missing — run via deploy.sh`
+	if envCaveat(real) == "" {
+		t.Error("a missing-variable failure should be explained")
+	}
+	if got := envCaveat("health gate failed: probe returned 502"); got != "" {
+		t.Errorf("an ordinary failure must not be given an environment excuse: %q", got)
+	}
+}
+
+// Two updates must never run against one service. The window this closes is ordinary: "Update all"
+// scans registries for several seconds with every Update button still live.
+func TestJobs_StartRefusesASecondUpdateForTheSameService(t *testing.T) {
+	m := newJobManager()
+	first := m.start("monitoring", "prometheus", "v3.13.2", "v3.14.0")
+	if first == nil {
+		t.Fatal("the first update should be allowed")
+	}
+	if second := m.start("monitoring", "prometheus", "v3.13.2", "v3.14.0"); second != nil {
+		t.Error("a second update for the same service was allowed to start")
+	}
+	// a different service is unaffected
+	if other := m.start("monitoring", "alertmanager", "v0.33", "v0.34"); other == nil {
+		t.Error("an unrelated service should still be startable")
+	}
+	// and once the first finishes, the service is free again
+	m.finish(first, "updated", "")
+	if again := m.start("monitoring", "prometheus", "v3.14.0", "v3.15.0"); again == nil {
+		t.Error("a finished job must not block the next update")
+	}
+}

@@ -780,6 +780,14 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "result", map[string]any{"Service": service, "Err": why})
 		return
 	}
+	// An update already in flight for this service must not be started a second time. This was
+	// reachable simply by pressing Update while "Update all" was still scanning: the buttons stay
+	// live, and nothing downstream was checking.
+	if s.jobs.activeFor("", p.Name, service) { // friendly message; start() is the real guard
+		s.render(w, "result", map[string]any{"Service": service,
+			"Err": "already updating — see Activity"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout+30*time.Second)
 	defer cancel()
 	res, current := s.applyUpdate(ctx, p, service, target)
@@ -1151,13 +1159,22 @@ func (s *Server) batches(ups []pendingUpd) []*batch {
 func (s *Server) handleUpdateAll(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		ctx := context.Background()
+		// The scan below is a registry round trip per service; show it as work in progress rather
+		// than leaving the tray empty while it runs.
+		scan := s.jobs.startScan("all services")
 		conc := s.set.Get().Concurrency
 		if conc < 1 {
 			conc = 1
 		}
 		sem := make(chan struct{}, conc)
 		var wg sync.WaitGroup
-		for _, b := range s.batches(s.pendingUpdates(ctx)) {
+		batches := s.batches(s.pendingUpdates(ctx))
+		n := 0
+		for _, b := range batches {
+			n += len(b.ups)
+		}
+		s.jobs.finishScan(scan, n)
+		for _, b := range batches {
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(b *batch) {
@@ -1285,6 +1302,12 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 	}
 
 	job := s.jobs.start(p.Name, service, current, target)
+	if job == nil {
+		// Someone (or an update-all batch) is already updating this service; two engines racing on
+		// one compose service is worse than doing nothing.
+		return engine.Result{Outcome: engine.OutcomeSkipped,
+			Err: fmt.Errorf("already updating %s — see Activity", service)}, current
+	}
 	logCtx, stopLogs := context.WithCancel(ctx)
 	go s.streamLogs(logCtx, p.File, service, job) // live progress in the Activity tray
 
@@ -1306,6 +1329,9 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 		if caveat := rollbackCaveat(p.File, service); caveat != "" {
 			errStr = strings.TrimSpace(errStr + "\n" + caveat)
 		}
+		if caveat := envCaveat(errStr); caveat != "" {
+			errStr = strings.TrimSpace(errStr + "\n" + caveat)
+		}
 	}
 	s.jobs.finish(job, string(res.Outcome), strings.TrimSpace(res.Logs))
 	s.store.Add(store.Record{
@@ -1323,6 +1349,21 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 		s.notify.Success(p.Name, service, current, target)
 	}
 	return res, current
+}
+
+// envCaveat explains a compose failure that is really about Belay's environment rather than the
+// update. A stack whose secrets are supplied by a deploy wrapper -- an --env-file, an exported
+// variable -- interpolates fine for that wrapper and fails for Belay, which runs plain
+// `docker compose` and has none of it. The compose error alone ("required variable X is missing a
+// value") reads like a broken stack, when the stack is fine and the caller is wrong.
+func envCaveat(errStr string) string {
+	if !strings.Contains(errStr, "required variable") && !strings.Contains(errStr, "interpolating") {
+		return ""
+	}
+	return "NOTE: Belay runs `docker compose` directly, without whatever wrapper normally supplies " +
+		"this stack's variables, so any ${VAR} the compose file requires must be reachable from " +
+		"Belay too — an .env beside the compose file, or a pin on this service to leave it to your " +
+		"deploy script."
 }
 
 // statefulImages are image names that indicate a service holds persistent state a rollback cannot

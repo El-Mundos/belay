@@ -221,6 +221,10 @@ func (s *Server) handleRemoteUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := r.FormValue("image")
+	if s.jobs.activeFor(host, filepath.Base(filepath.Dir(r.FormValue("file"))), r.FormValue("s")) {
+		fmt.Fprint(w, `<span class="muted">already updating — see Activity</span>`)
+		return
+	}
 	if why := s.remoteProtected(host, r.FormValue("file"), r.FormValue("s")); why != "" {
 		fmt.Fprintf(w, `<span class="err">🔒 %s</span>`, html.EscapeString(why))
 		return
@@ -259,6 +263,9 @@ func (s *Server) enqueue(host, file, service, image string) bool {
 	}
 	if s.remoteProtected(host, file, service) != "" {
 		return false // the agent's own container / Docker transport; it would kill the executor
+	}
+	if s.jobs.activeFor(host, filepath.Base(filepath.Dir(file)), service) {
+		return false // already in flight on that host
 	}
 	cmd := cluster.Command{ID: newToken()[:12], Kind: "update", Project: file, Service: service, Image: image, Auth: s.authForImage(image)}
 	select {

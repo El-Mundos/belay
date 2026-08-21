@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -45,6 +46,56 @@ type jobManager struct {
 
 func newJobManager() *jobManager { return &jobManager{max: 50, byCmd: map[string]*Job{}} }
 
+// startScan records the "work out what needs updating" step as a job of its own.
+//
+// That scan is a registry round trip per service across every host, so it can run for ten seconds
+// or more before the first real update begins. Without an entry for it, pressing "Update all"
+// appeared to do nothing at all until the scan finished — and left every Update button live in the
+// meantime, inviting a second run of work already in flight.
+func (m *jobManager) startScan(what string) *Job {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.seq++
+	j := &Job{ID: m.seq, Project: what, Service: "checking for updates", State: "running",
+		Phase: "scanning", Started: time.Now()}
+	m.jobs = append(m.jobs, j)
+	if len(m.jobs) > m.max {
+		m.jobs = m.jobs[len(m.jobs)-m.max:]
+	}
+	return j
+}
+
+// finishScan closes the scan job, saying what it found. "nothing to update" is a real answer and
+// deserves to be visible, not an empty tray.
+func (m *jobManager) finishScan(j *Job, found int) {
+	if j == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j.Ended = time.Now()
+	j.Phase = ""
+	if found == 0 {
+		j.State, j.Service = "skipped", "nothing to update"
+		return
+	}
+	j.State = "updated"
+	j.Service = fmt.Sprintf("found %d update(s)", found)
+}
+
+// activeFor reports whether an update is already running for a service, so a second one cannot be
+// started on top of it. Keyed on project+service and, for remote work, the host.
+func (m *jobManager) activeFor(host, project, service string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, j := range m.jobs {
+		if j.Running() && j.Host == host && j.Project == project && j.Service == service {
+			return true
+		}
+	}
+	return false
+}
+
 // startRemote records a remote (agent) update as a running job so it shows in the Activity tray
 // immediately, correlated to its command id so the agent's result can finish it.
 func (m *jobManager) startRemote(host, project, service, to, cmdID string) {
@@ -81,9 +132,20 @@ func (m *jobManager) finishCmd(cmdID, state, from, to, logs string) {
 	delete(m.byCmd, cmdID)
 }
 
+// start claims a service for an update, returning nil if one is ALREADY running for it.
+//
+// Claiming and checking have to happen under the same lock, or two updates race into the gap
+// between them — which is reachable in ordinary use: "Update all" spends its first seconds scanning
+// registries with every Update button still live, so a click during that window and the batch that
+// arrives afterwards would both act on the same service.
 func (m *jobManager) start(project, service, from, to string) *Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for _, j := range m.jobs {
+		if j.Running() && j.Host == "" && j.Project == project && j.Service == service {
+			return nil
+		}
+	}
 	m.seq++
 	j := &Job{ID: m.seq, Project: project, Service: service, From: from, To: to, State: "running", Phase: "starting…", Started: time.Now()}
 	m.jobs = append(m.jobs, j)
