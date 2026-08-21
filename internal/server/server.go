@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"html/template"
 	"io/fs"
 	"log"
@@ -210,6 +211,8 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /failed", s.guard(s.handleFailed))
 	mux.HandleFunc("GET /history", s.guard(s.handleHistory))
 	mux.HandleFunc("GET /record", s.guard(s.handleRecord))
+	mux.HandleFunc("POST /retry", s.guard(s.handleRetry))
+	mux.HandleFunc("POST /dismiss", s.guard(s.handleDismiss))
 	mux.HandleFunc("GET /check", s.guard(s.handleCheck))
 	mux.HandleFunc("GET /review", s.guard(s.handleReview))
 	mux.HandleFunc("GET /review/check", s.guard(s.handleReviewCheck))
@@ -456,10 +459,111 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFailed(w http.ResponseWriter, r *http.Request) {
 	rows := newRecViews(s.store.Failed())
+	for i := range rows {
+		// The chain: every earlier attempt at this same service, newest first, minus the one the
+		// card is already showing.
+		for _, a := range s.store.Attempts(rows[i].Project, rows[i].Service) {
+			if a.ID != rows[i].ID {
+				rows[i].Earlier = append(rows[i].Earlier, newRecView(a))
+			}
+		}
+		_, _, rows[i].Retryable = s.retryTarget(rows[i].Record)
+	}
 	data := s.base(r, "failed")
 	data["Records"] = rows
 	data["Rev"] = listRev(rows)
 	s.render(w, "failed", data)
+}
+
+// retryTarget resolves a stored record back to something we can act on: the compose file it came
+// from, and the agent host if it was remote. A record only carries display names, so a stack that
+// has since gone away (or an agent that is offline) simply cannot be retried — say so rather than
+// offering a button that fails.
+func (s *Server) retryTarget(rec store.Record) (file, host string, ok bool) {
+	if h, proj, isRemote := strings.Cut(rec.Project, "/"); isRemote {
+		s.agentsMu.Lock()
+		defer s.agentsMu.Unlock()
+		c := s.agents[h]
+		if c == nil || time.Since(c.lastSeen) > 90*time.Second {
+			return "", "", false
+		}
+		for _, p := range c.projects {
+			if p.Name != proj {
+				continue
+			}
+			for _, sv := range p.Services {
+				if sv.Name == rec.Service {
+					return p.File, h, sv.Protected == ""
+				}
+			}
+		}
+		return "", "", false
+	}
+	for _, p := range s.cfg.Projects {
+		if p.Name == rec.Project {
+			return p.File, "", s.protectedReason(rec.Service, rec.To) == ""
+		}
+	}
+	return "", "", false
+}
+
+// handleRetry runs a failed update again, against the same target image.
+func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	id, _ := strconv.Atoi(r.FormValue("id"))
+	rec, found := s.store.ByID(id)
+	if !found {
+		fmt.Fprint(w, `<span class="err small">no such record</span>`)
+		return
+	}
+	file, host, ok := s.retryTarget(rec)
+	if !ok {
+		fmt.Fprint(w, `<span class="err small">nothing to retry against — the stack or agent is gone</span>`)
+		return
+	}
+	if host != "" {
+		if !s.enqueue(host, file, rec.Service, rec.To) {
+			fmt.Fprint(w, `<span class="err small">could not queue on `+html.EscapeString(host)+`</span>`)
+			return
+		}
+		fmt.Fprint(w, `<span class="ok small">queued on `+html.EscapeString(host)+` — see Activity</span>`)
+		return
+	}
+	p, pok := s.projectByFile(file)
+	if !pok {
+		fmt.Fprint(w, `<span class="err small">unknown project</span>`)
+		return
+	}
+	// Same path as pressing Update on the dashboard: a background job, so the click returns at once.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout+30*time.Second)
+		defer cancel()
+		s.applyUpdate(ctx, p, rec.Service, rec.To)
+	}()
+	fmt.Fprint(w, `<span class="ok small">retrying — see Activity</span>`)
+}
+
+// handleDismiss acknowledges a failure: it leaves the worklist, and stays in History.
+func (s *Server) handleDismiss(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	id, _ := strconv.Atoi(r.FormValue("id"))
+	rec, found := s.store.ByID(id)
+	if !found {
+		fmt.Fprint(w, `<span class="err small">no such record</span>`)
+		return
+	}
+	s.store.Dismiss(rec.Project, rec.Service)
+	s.handleFailed(w, r) // htmx picks #failed-list out of the re-rendered page
+}
+
+// projectByFile finds a configured project by its compose file path.
+func (s *Server) projectByFile(file string) (Project, bool) {
+	for _, p := range s.cfg.Projects {
+		if p.File == file {
+			return p, true
+		}
+	}
+	return Project{}, false
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
@@ -493,6 +597,9 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 				}
 			} else if rec.Outcome == "updated" {
 				row.RollbackWhy = "Rollback window expired"
+			}
+			if row.Failure() {
+				row.RollbackWhy = "" // nothing was deployed, so there is nothing to roll back
 			}
 		}
 		seen[k] = true
@@ -1147,6 +1254,18 @@ func (s *Server) unwindBatch(ctx context.Context, applied []pendingUpd, failedSv
 func (s *Server) applyUpdate(ctx context.Context, p Project, service, target string) (engine.Result, string) {
 	current, err := compose.FindImage(p.File, service)
 	if err != nil {
+		// An update that cannot even start is still an attempt, and it has to be recorded here:
+		// every other outcome below is, and a caller that fired this in the background — a retry —
+		// has no other way to report that nothing happened.
+		errStr := err.Error()
+		s.store.Add(store.Record{
+			Project: p.Name, Service: service, To: target,
+			Outcome: string(engine.OutcomeError), Err: errStr, Duration: "-",
+		})
+		s.notify.Failure(notify.Event{
+			Project: p.Name, Service: service, To: target,
+			Outcome: string(engine.OutcomeError), Error: errStr,
+		})
 		return engine.Result{Outcome: engine.OutcomeError, Err: err}, ""
 	}
 	// Deploying the ref that is already in the compose file means the tag itself moved: a rebase.

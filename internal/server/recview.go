@@ -36,6 +36,15 @@ type recView struct {
 	PID          int    // project id, for the rollback POST
 	Expires      string // human "expires …" for the button tooltip
 
+	// Earlier is this service's previous attempts, newest first — the retry chain. It is derived
+	// from the records themselves (same project + service), not stored: retries are a sequence
+	// against one service, so the key they already share is the whole relationship.
+	Earlier []recView
+
+	// Retryable means we can work out where to send a retry (a local project, or an online agent
+	// that still reports the stack).
+	Retryable bool
+
 	// RollbackWhy explains a DISABLED button. Empty means show no button at all — a row that never
 	// had a rollback point must not be dressed up as one whose window expired, which is what a
 	// blanket "expired" tooltip did to Belay's own self-update rows.
@@ -49,6 +58,12 @@ const (
 	SelfUpdateProject = "belay"
 	SelfUpdateService = "belay (self-update)"
 )
+
+// Failure reports whether this record is a failed attempt — in History that means a dismissed one,
+// which must still look like a failure rather than borrowing a success's styling.
+func (v recView) Failure() bool {
+	return v.Outcome == "rolled_back" || v.Outcome == "error"
+}
 
 // IsSelfUpdate reports whether a record is Belay updating itself rather than a compose service.
 func (v recView) IsSelfUpdate() bool {

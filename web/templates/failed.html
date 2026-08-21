@@ -1,7 +1,10 @@
 {{define "content"}}
 <h2 class="tabhead">Failed updates</h2>
+<p class="muted small">What still needs you. Dismissing keeps the attempt in
+<a href="/history">History</a> — it only stops it asking.</p>
 <div id="failed-list" data-poll data-rev="{{.Rev}}"
-     hx-get="/failed" hx-trigger="every 6s" hx-select="#failed-list" hx-target="#failed-list" hx-swap="outerHTML">
+     hx-get="/failed" hx-trigger="every 6s" hx-select="#failed-list" hx-select-oob="#tabs"
+     hx-target="#failed-list" hx-swap="outerHTML">
 {{if not .Records}}<p class="muted">No failed updates. 🎉</p>{{end}}
 {{range .Records}}
 <div class="record fail">
@@ -9,6 +12,7 @@
     <div class="rec-title">
       <span class="svc">{{.Service}}</span>
       {{if eq .Outcome "rolled_back"}}<span class="badge-err">↩ rolled back</span>{{else}}<span class="badge-err">✕ error</span>{{end}}
+      {{if .Earlier}}<span class="chip" title="Earlier attempts at this service">{{len .Earlier}} earlier</span>{{end}}
     </div>
     <div class="rec-ver mono">
       {{if .Repo}}<span class="repo muted">{{.Repo}}</span>{{end}}
@@ -21,8 +25,37 @@
       </div>
     {{end}}
     <div class="rec-meta muted">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}}</div>
+
+    {{if .Earlier}}
+    {{/* The retry chain: previous attempts at this same service, newest first. */}}
+    <details class="attempts" data-log="chain-{{.ID}}">
+      <summary>{{len .Earlier}} earlier attempt{{if ne (len .Earlier) 1}}s{{end}}</summary>
+      {{range .Earlier}}
+      <div class="attempt">
+        <span class="att-when muted">{{.Time.Format "Jan 2, 15:04"}}</span>
+        <span class="att-out {{if eq .Outcome "updated"}}ok{{else if eq .Outcome "reverted"}}upd{{else}}err{{end}}">{{.Outcome}}</span>
+        <span class="att-ver mono muted">{{.FromRef}} → {{.ToRef}}</span>
+        {{if .HasDetails}}<button class="linkish" onclick="belayRecord({{.ID}})">logs</button>{{end}}
+      </div>
+      {{end}}
+    </details>
+    {{end}}
+    <div class="rec-status" id="act-{{.ID}}"></div>
   </div>
   <div class="rec-actions">
+    {{if .Retryable}}
+      <button class="btn warn" hx-post="/retry" hx-vals='{"id":"{{.ID}}"}'
+              hx-target="#act-{{.ID}}" hx-swap="innerHTML"
+              hx-confirm="Retry {{.Service}} → {{.ToRef}}? It runs through the same health gate and rolls back again if it fails."
+              data-ok-label="Retry">↻ Retry</button>
+    {{else}}
+      <button class="btn ghost" disabled
+              title="The stack this came from is no longer configured, its agent is offline, or the service is protected">↻ Retry</button>
+    {{end}}
+    <button class="btn ghost" hx-post="/dismiss" hx-vals='{"id":"{{.ID}}"}'
+            hx-target="#failed-list" hx-select="#failed-list" hx-swap="outerHTML"
+            hx-confirm="Dismiss {{.Service}}? It leaves this list and stops counting, but stays in History with its logs. It comes back if it fails again."
+            data-ok-label="Dismiss">Dismiss</button>
     {{if .HasDetails}}<button class="btn ghost" onclick="belayRecord({{.ID}})">Details</button>{{else}}<span class="rec-slot"></span>{{end}}
   </div>
 </div>

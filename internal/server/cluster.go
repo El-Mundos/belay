@@ -3,10 +3,12 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"html"
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -159,9 +161,20 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	}
 	data := s.base(r, "hosts")
 	data["Hosts"] = hosts
+	data["Rev"] = hostsRev(hosts)
 	data["StaleAgents"] = stale
 	data["AgentsEnabled"] = s.agentsEnabled()
 	s.render(w, "hosts", data)
+}
+
+// hostsRev fingerprints the cards so an unchanged poll skips the DOM swap, exactly as the record
+// lists do. Everything the card renders goes in; nothing else does.
+func hostsRev(hosts []hostView) string {
+	h := fnv.New64a()
+	for _, v := range hosts {
+		fmt.Fprintf(h, "%s|%s|%t|%t|%d|", v.Host, v.Version, v.Online, v.Stale, len(v.Projects))
+	}
+	return strconv.FormatUint(h.Sum64(), 36)
 }
 
 // localHost describes the machine this server runs on, in the same shape as an agent.

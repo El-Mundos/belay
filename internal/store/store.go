@@ -23,6 +23,11 @@ type Record struct {
 	Err      string
 	Logs     string
 	Duration string
+
+	// Dismissed takes a failure off the Failed worklist without destroying it. Failed answers
+	// "what still needs me?", History answers "what happened" -- so acknowledging a failure you
+	// are not going to act on should change the first and never the second.
+	Dismissed bool `json:",omitempty"`
 }
 
 // RollbackPoint is a retained snapshot + previous image that lets the user manually roll a
@@ -135,6 +140,9 @@ func (s *Store) Failed() []Record {
 			continue // only the latest attempt per service counts
 		}
 		seen[k] = true
+		if r.Dismissed {
+			continue // acknowledged; it stays in History but is no longer asking for attention
+		}
 		if r.Outcome == "rolled_back" || r.Outcome == "error" {
 			out = append(out, r)
 		}
@@ -142,17 +150,57 @@ func (s *Store) Failed() []Record {
 	return out
 }
 
+// Attempts returns every recorded attempt for one service, newest first. The Failed tab shows the
+// current failure with its earlier tries underneath: retries are a sequence against one service,
+// and the key they share is the only thing needed to group them.
+func (s *Store) Attempts(project, service string) []Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Record
+	for i := len(s.recs) - 1; i >= 0; i-- {
+		if s.recs[i].Project == project && s.recs[i].Service == service {
+			out = append(out, s.recs[i])
+		}
+	}
+	return out
+}
+
+// Dismiss acknowledges every recorded attempt for a service. A later attempt adds an undismissed
+// record, so a service that fails again comes back on its own.
+func (s *Store) Dismiss(project, service string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for i := range s.recs {
+		if s.recs[i].Project == project && s.recs[i].Service == service && !s.recs[i].Dismissed {
+			s.recs[i].Dismissed = true
+			n++
+		}
+	}
+	if n > 0 {
+		s.save()
+	}
+	return n
+}
+
 // FailedCount is the number of services currently in a failed state (the red badge).
 func (s *Store) FailedCount() int { return len(s.Failed()) }
 
-// Succeeded returns successful updates and manual reverts, newest first (the History tab /
-// log of good upgrades).
+// Succeeded returns what History shows, newest first: successful updates, manual reverts, and
+// failures that were DISMISSED.
+//
+// A dismissed failure has to land somewhere. Failed is a worklist and dismissing removes it from
+// there — but dropping it from History too would mean acknowledging a failure quietly deletes it,
+// which is the opposite of what dismissing is for.
 func (s *Store) Succeeded() []Record {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []Record
 	for i := len(s.recs) - 1; i >= 0; i-- {
-		if o := s.recs[i].Outcome; o == "updated" || o == "reverted" {
+		switch o := s.recs[i].Outcome; {
+		case o == "updated" || o == "reverted":
+			out = append(out, s.recs[i])
+		case s.recs[i].Dismissed && (o == "rolled_back" || o == "error"):
 			out = append(out, s.recs[i])
 		}
 	}

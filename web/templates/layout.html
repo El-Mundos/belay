@@ -21,7 +21,7 @@
 <!-- always present, empty when there is nothing to announce: an out-of-band swap needs a target -->
 <div id="su-banner">{{template "subanner" .}}</div>
 {{if .Active}}
-<nav class="tabs">
+<nav class="tabs" id="tabs">
   <a href="/" class="{{if eq .Active "updates"}}on{{end}}">Updates{{if .Pending}} <span class="badge badge-upd">{{.Pending}}</span>{{end}}</a>
   <a href="/failed" class="{{if eq .Active "failed"}}on{{end}}">Failed{{if .FailedCount}} <span class="badge">{{.FailedCount}}</span>{{end}}</a>
   <a href="/history" class="{{if eq .Active "history"}}on{{end}}">History</a>

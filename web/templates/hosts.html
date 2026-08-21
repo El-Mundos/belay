@@ -17,7 +17,11 @@
   {{end}}
 </div>
 
-<div class="host-cards" id="host-cards">
+{{/* Hosts refreshes on the same no-churn poll as the other lists: an agent that finishes
+     updating re-registers with a new version, and the card has to notice without a reload. */}}
+<div class="host-cards" id="host-cards" data-poll data-rev="{{.Rev}}"
+     hx-get="/hosts" hx-trigger="every 6s" hx-select="#host-cards" hx-select-oob="#tabs"
+     hx-target="#host-cards" hx-swap="outerHTML">
 {{range $i, $h := .Hosts}}
 <div class="card host-card{{if $h.Local}} host-local{{end}}">
   <h3>

@@ -100,6 +100,17 @@ pre { background:#0a0c10; color:#cdd3e0; padding:10px; border-radius:6px; overfl
   .rec-slot { display:none; }
 }
 
+/* retry chain: earlier attempts at the same service, folded away until asked for */
+.attempts { margin-top:8px; }
+.attempts > summary { font-size:12px; }
+.attempt { display:flex; align-items:baseline; gap:10px; padding:4px 0 4px 14px;
+  border-left:2px solid var(--line); margin-left:2px; font-size:12.5px; }
+.att-when { flex:none; font-size:12px; }
+.att-out { flex:none; font-weight:600; font-size:12px; }
+.att-ver { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rec-status { min-height:0; font-size:12.5px; }
+.rec-status:not(:empty) { margin-top:6px; }
+
 /* modal */
 .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex;
   align-items:center; justify-content:center; z-index:50; animation:fade .12s ease; }

@@ -1,18 +1,20 @@
 {{define "content"}}
 <h2 class="tabhead">Upgrade history</h2>
 <div id="history-list" data-poll data-rev="{{.Rev}}"
-     hx-get="/history" hx-trigger="every 6s" hx-select="#history-list" hx-target="#history-list" hx-swap="outerHTML">
+     hx-get="/history" hx-trigger="every 6s" hx-select="#history-list" hx-select-oob="#tabs" hx-target="#history-list" hx-swap="outerHTML">
 {{if not .Records}}<p class="muted">No successful upgrades yet.</p>{{end}}
 {{range .Records}}
-<div class="record ok">
+<div class="record {{if .Failure}}fail{{else}}ok{{end}}">
   <div class="rec-main">
     <div class="rec-title">
       <span class="svc">{{.Service}}</span>
       {{if eq .Outcome "reverted"}}<span class="badge-rev">↩ reverted</span>{{end}}
+      {{if .Failure}}<span class="badge-err">{{if eq .Outcome "rolled_back"}}↩ rolled back{{else}}✕ error{{end}}</span>
+        <span class="chip" title="Dismissed from the Failed list; kept here with its logs">dismissed</span>{{end}}
     </div>
     <div class="rec-ver mono">
       {{if .Repo}}<span class="repo muted">{{.Repo}}</span>{{end}}
-      <span class="muted">{{.FromRef}}</span><span class="arrow">→</span><span class="ok">{{.ToRef}}</span>
+      <span class="muted">{{.FromRef}}</span><span class="arrow">→</span><span class="{{if .Failure}}err{{else}}ok{{end}}">{{.ToRef}}</span>
     </div>
     <div class="rec-meta muted">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}} · {{.Duration}}</div>
   </div>
