@@ -49,6 +49,12 @@ type Result struct {
 	Err      error
 }
 
+// Preflighter is an optional Deployer capability: a dry run answering "could this deployment even
+// be rendered?". Kept optional so a Deployer that has no such notion simply does not implement it.
+type Preflighter interface {
+	Preflight(ctx context.Context, r Request) error
+}
+
 // Deployer applies a desired image tag to a service and brings it up. Implemented by the agent
 // against docker compose.
 type Deployer interface {
@@ -97,6 +103,16 @@ func (e *Engine) SafeUpdate(ctx context.Context, r Request) Result {
 	// A rebase deliberately keeps the same tag, so equal refs are real work there, not a no-op.
 	if r.ToImage == "" || (r.FromImage == r.ToImage && !r.Rebase) {
 		return finish(OutcomeSkipped, nil)
+	}
+
+	// 0. Refuse to deploy something we cannot fully render. This runs before the snapshot and
+	// before the tag is touched, so a project whose variables are missing is left exactly as it
+	// was — no rollback needed, because nothing happened.
+	if p, ok := e.Deployer.(Preflighter); ok {
+		r.phase("checking the deployment renders")
+		if err := p.Preflight(ctx, r); err != nil {
+			return finish(OutcomeError, err)
+		}
 	}
 
 	// 0. snapshot the service's volumes so a rollback can restore data too

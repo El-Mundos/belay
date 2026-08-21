@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -71,6 +72,73 @@ func (l Local) Logs(ctx context.Context, r engine.Request, tail int) (string, er
 	out, _ := output(ctx, "docker", "compose", "-f", f, "logs",
 		"--no-color", "--no-log-prefix", "--tail", strconv.Itoa(tail), r.Service)
 	return out, nil
+}
+
+// Preflight reports whether Compose can fully render this project, without touching anything.
+//
+// `docker compose config` runs the SAME interpolation the real deployment would, as a dry run. Two
+// failures matter, and the second is the dangerous one:
+//
+//   - a guarded variable is missing -> compose errors, and the deployment would fail loudly;
+//   - an UNGUARDED variable is missing -> compose warns and substitutes a blank string, so
+//     "${A}.${B}" becomes "." and the container starts perfectly healthy with a useless value.
+//
+// The second is how a credential supplied by a deploy wrapper disappears when anything else
+// recreates the container: nothing errors, nothing looks wrong, and the damage surfaces weeks later.
+// Refusing to deploy a project we cannot fully render is the only way to catch it in time.
+func (l Local) Preflight(ctx context.Context, r engine.Request) error {
+	f, err := l.file(r)
+	if err != nil {
+		return err
+	}
+	out, err := output(ctx, "docker", "compose", "-f", f, "config", "--quiet")
+	if err != nil {
+		if line := firstInterpolationError(out); line != "" {
+			return fmt.Errorf("compose cannot render this project: %s", line)
+		}
+		return fmt.Errorf("compose cannot render this project: %s", strings.TrimSpace(lastLine(out)))
+	}
+	if blank := blankVars(out); len(blank) > 0 {
+		return fmt.Errorf("compose would substitute a blank string for %s — this project expects "+
+			"variables Belay does not have, and deploying would silently drop them. Supply them "+
+			"(an .env beside the compose file) or pin this service",
+			strings.Join(blank, ", "))
+	}
+	return nil
+}
+
+// blankVars extracts the variable names compose warned it would blank out.
+func blankVars(out string) []string {
+	// Compose emits its warnings as JSON-quoted log lines, so the variable name arrives wrapped in
+	// escaped quotes. Unescape first and match plain quotes, rather than encoding that detail into
+	// the pattern where it is easy to get subtly wrong.
+	out = strings.ReplaceAll(out, `\"`, `"`)
+	var names []string
+	seen := map[string]bool{}
+	for _, m := range blankVarRe.FindAllStringSubmatch(out, -1) {
+		if n := m[1]; !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+// e.g. level=warning msg="The "IONOS_API_KEY" variable is not set. Defaulting to a blank string."
+var blankVarRe = regexp.MustCompile(`The "([A-Za-z_][A-Za-z0-9_]*)" variable is not set`)
+
+func firstInterpolationError(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "error while interpolating") || strings.Contains(line, "required variable") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
+}
+
+func lastLine(out string) string {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	return lines[len(lines)-1]
 }
 
 // HostName is the name of the MACHINE Belay manages, which is not the same as this process's

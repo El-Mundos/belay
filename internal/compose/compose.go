@@ -155,11 +155,15 @@ func CommitIfRepo(file, msg string) error {
 	if exec.Command("git", "-C", dir, "rev-parse", "--git-dir").Run() != nil {
 		return nil // not a git repo
 	}
-	if err := exec.Command("git", "-C", dir, "add", filepath.Base(file)).Run(); err != nil {
+	base := filepath.Base(file)
+	if err := exec.Command("git", "-C", dir, "add", base).Run(); err != nil {
 		return err
 	}
-	if exec.Command("git", "-C", dir, "diff", "--cached", "--quiet").Run() == nil {
-		return nil // nothing staged
+	if exec.Command("git", "-C", dir, "diff", "--cached", "--quiet", "--", base).Run() == nil {
+		return nil // this file has no staged change
 	}
-	return exec.Command("git", "-C", dir, "commit", "-m", msg).Run()
+	// Commit ONLY this file. A bare `git commit` takes whatever the index happens to hold, so
+	// anything someone else had staged in this directory would ride along under a message claiming
+	// to be an image bump — including, in a stack directory, a rendered secrets file.
+	return exec.Command("git", "-C", dir, "commit", "-m", msg, "--", base).Run()
 }
