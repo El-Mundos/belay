@@ -104,7 +104,9 @@ func (l Local) Preflight(ctx context.Context, r engine.Request) error {
 			"(an .env beside the compose file) or pin this service",
 			strings.Join(blank, ", "))
 	}
-	return nil
+	// Last, because it costs a helper container: a pull that cannot fit fails here, cleanly,
+	// instead of halfway through extracting a layer with the old container already gone.
+	return checkSpace(ctx, r)
 }
 
 // blankVars extracts the variable names compose warned it would blank out.

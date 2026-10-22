@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -23,10 +24,21 @@ import (
 // agentConn is a connected remote agent: the stacks it reported and a queue of commands for it.
 type agentConn struct {
 	host     string
-	version  string // agent's build version ("" = predates the field)
+	version  string   // agent's build version ("" = predates the field)
+	caps     []string // command kinds beyond "update" it accepts (see cluster.Registration)
 	projects []cluster.Project
 	lastSeen time.Time
 	queue    chan cluster.Command
+}
+
+// can reports whether the agent advertised a capability. Callers hold s.agentsMu.
+func (c *agentConn) can(capability string) bool {
+	for _, k := range c.caps {
+		if k == capability {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) agentsEnabled() bool { return s.cfg.AgentToken != "" }
@@ -58,6 +70,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	c.projects = reg.Projects
 	c.version = reg.Version
+	c.caps = reg.Caps
 	c.lastSeen = time.Now()
 	s.agentsMu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
@@ -100,11 +113,22 @@ func (s *Server) handleAgentResult(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad result", http.StatusBadRequest)
 		return
 	}
+	// A prune answer is bookkeeping on an earlier update, not an attempt of its own.
+	if res.Prune != nil {
+		if p, ok := s.store.PruneByCommand(res.CommandID); ok {
+			s.finishPrune(p, *res.Prune)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	label := res.Host + "/" + res.Project
-	s.store.Add(store.Record{
+	recID := s.store.Add(store.Record{
 		Project: label, Service: res.Service, From: res.From, To: res.To,
 		Outcome: res.Outcome, Err: res.Err, Logs: res.Logs, Duration: res.Duration,
 	})
+	if l := res.Leftover; l != nil && l.ImageID != "" {
+		s.schedulePrune(res.Host, l.ImageID, l.Repo, recID)
+	}
 	switch res.Outcome {
 	case "rolled_back", "error":
 		s.notify.Failure(notify.Event{
@@ -264,7 +288,7 @@ func (s *Server) handleRemoteUpdate(w http.ResponseWriter, r *http.Request) {
 	cmd := cluster.Command{
 		ID: newToken()[:12], Kind: "update",
 		Project: r.FormValue("file"), Service: r.FormValue("s"), Image: target,
-		Auth: s.authForImage(target),
+		Auth: s.authForImage(target), PullBytes: s.pullBytes(r.Context(), target),
 	}
 	select {
 	case c.queue <- cmd:
@@ -288,7 +312,8 @@ func (s *Server) enqueue(host, file, service, image string) bool {
 	if s.jobs.activeFor(host, filepath.Base(filepath.Dir(file)), service) {
 		return false // already in flight on that host
 	}
-	cmd := cluster.Command{ID: newToken()[:12], Kind: "update", Project: file, Service: service, Image: image, Auth: s.authForImage(image)}
+	cmd := cluster.Command{ID: newToken()[:12], Kind: "update", Project: file, Service: service, Image: image,
+		Auth: s.authForImage(image), PullBytes: s.pullBytes(context.Background(), image)}
 	select {
 	case c.queue <- cmd:
 		s.jobs.startRemote(host, filepath.Base(filepath.Dir(file)), service, image, cmd.ID) // show in Activity tray

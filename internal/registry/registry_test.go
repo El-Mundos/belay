@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -167,5 +168,32 @@ func TestDigest(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("Digest = %q, want %q", got, want)
+	}
+}
+
+func TestPullSizeFollowsIndex(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	mux.HandleFunc("/v2/prom/prometheus/manifests/v3.15.1", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.oci.image.index.v1+json")
+		json.NewEncoder(w).Encode(map[string]any{"manifests": []map[string]any{
+			{"digest": "sha256:other", "platform": map[string]string{"architecture": "s390x"}},
+			{"digest": "sha256:mine", "platform": map[string]string{"architecture": runtime.GOARCH}},
+		}})
+	})
+	mux.HandleFunc("/v2/prom/prometheus/manifests/sha256:mine", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		json.NewEncoder(w).Encode(map[string]any{"layers": []map[string]any{{"size": 100}, {"size": 23}}})
+	})
+	c := &Client{HTTP: srv.Client(), Scheme: "http"}
+	ref := Ref{Registry: strings.TrimPrefix(srv.URL, "http://"), Repository: "prom/prometheus", Tag: "v3.15.1"}
+
+	got, err := c.PullSize(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 123 {
+		t.Errorf("PullSize = %d, want 123 (this platform's layers only)", got)
 	}
 }

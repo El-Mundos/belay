@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // fakeDeployer records the sequence of image tags it was told to run, and can simulate an
@@ -204,5 +205,57 @@ func TestSafeUpdate_RebaseRollsBackToPinnedDigest(t *testing.T) {
 	if d.current != old {
 		t.Errorf("running image = %q, want the pinned digest %q — reverting to the tag would "+
 			"re-pull the build that just failed", d.current, old)
+	}
+}
+
+// slowPullDeployer reproduces galaxy's prometheus update (2026-10-22): the new image's pull outlives
+// the caller's deadline. The old image is already present, so reverting to it must still work.
+type slowPullDeployer struct{ fakeDeployer }
+
+func (d *slowPullDeployer) Up(ctx context.Context, r Request) error {
+	if d.current == r.ToImage {
+		<-ctx.Done() // the pull runs until the deadline kills it
+		return ctx.Err()
+	}
+	if ctx.Err() != nil {
+		return ctx.Err() // a rollback on the expired context dies here
+	}
+	return d.fakeDeployer.Up(ctx, r)
+}
+
+type countingSnap struct{ discarded, restored int }
+
+func (s *countingSnap) Snapshot(context.Context, Request) (string, error) { return "snap1", nil }
+func (s *countingSnap) Restore(context.Context, Request, string) error    { s.restored++; return nil }
+func (s *countingSnap) Discard(context.Context, Request, string)          { s.discarded++ }
+
+func TestSafeUpdate_TimeoutStillRollsBack(t *testing.T) {
+	d := &slowPullDeployer{fakeDeployer{current: "app:1.0"}}
+	snap := &countingSnap{}
+	e := &Engine{Deployer: d, Health: fakeGate{healthy: true}, Snapshot: snap}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	res := e.SafeUpdate(ctx, req())
+	if res.Outcome != OutcomeRolledBack {
+		t.Fatalf("outcome = %q (%v), want rolled_back: the rollback must not inherit the expired deadline", res.Outcome, res.Err)
+	}
+	if d.current != "app:1.0" || snap.discarded != 1 {
+		t.Fatalf("running %q, snapshot discarded %d times; want app:1.0 and 1", d.current, snap.discarded)
+	}
+}
+
+// failingRollback cannot bring anything up, so the rollback itself fails.
+type failingRollback struct{ fakeDeployer }
+
+func (failingRollback) Up(context.Context, Request) error { return errors.New("daemon gone") }
+
+func TestSafeUpdate_FailedRollbackHandsBackSnapshot(t *testing.T) {
+	snap := &countingSnap{}
+	e := &Engine{Deployer: &failingRollback{}, Health: fakeGate{healthy: true}, Snapshot: snap}
+	res := e.SafeUpdate(context.Background(), req())
+	if res.Outcome != OutcomeError || res.Snapshot != "snap1" || snap.discarded != 0 {
+		t.Fatalf("got outcome %q, snapshot %q, discarded %d; want error, snap1 kept for the caller",
+			res.Outcome, res.Snapshot, snap.discarded)
 	}
 }

@@ -31,6 +31,7 @@
   <label>Keep manual rollback available for
     <input type="number" class="num" name="rollback_window_hours" min="0" value="{{.S.RollbackWindowHours}}"> hours <span class="muted">(0 = off)</span>
   </label>
+  <label class="check"><input type="checkbox" name="prune_images" {{if not .S.KeepReplacedImages}}checked{{end}}> Remove the image an update replaced once its rollback window ends <span class="muted small">(only images Belay replaced; never one a container still uses)</span></label>
   <label>Update-all runs
     <input type="number" class="num" name="concurrency" min="1" value="{{if .S.Concurrency}}{{.S.Concurrency}}{{else}}1{{end}}"> service(s) in parallel
   </label>

@@ -17,6 +17,8 @@
       <span class="muted">{{.FromRef}}</span><span class="arrow">→</span><span class="{{if .Failure}}err{{else}}ok{{end}}">{{.ToRef}}</span>
     </div>
     <div class="rec-meta muted">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}} · {{.Duration}}</div>
+    {{with .FreedSummary}}<div class="rec-meta muted small">{{.}}</div>{{end}}
+    {{with .PruneNote}}<div class="rec-meta muted small">{{.}}</div>{{end}}
   </div>
   <div class="rec-actions">
     {{if .SelfRollback}}

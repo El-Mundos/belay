@@ -144,6 +144,7 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 			st.AutoCheckHours = atoiDefault(r.FormValue("auto_check_hours"), 0)
 			st.RollbackWindowHours = atoiDefault(r.FormValue("rollback_window_hours"), 24)
 			st.AllowMajor = r.FormValue("allow_major") == "on"
+			st.KeepReplacedImages = r.FormValue("prune_images") != "on"
 			st.QuietHours = r.FormValue("quiet_hours") == "on"
 			st.QuietStart = atoiDefault(r.FormValue("quiet_start"), 0)
 			st.QuietEnd = atoiDefault(r.FormValue("quiet_end"), 0)

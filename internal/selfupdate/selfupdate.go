@@ -334,7 +334,17 @@ func (m *Manager) applyImage(ctx context.Context, o Opts, target string, pull bo
 		return fmt.Errorf("inspect self image: %w", err)
 	}
 	// Keep the outgoing image reachable by name before anything moves the tag off it.
+	oldPrevious, _ := dockerOut(ctx, "image", "inspect", "--format", "{{.Id}}", previousTag)
 	_ = runDocker(ctx, "tag", runningID, previousTag)
+	// The tag just left the build from the update before last. This update supersedes that one's
+	// rollback, so nothing can return to it, and without its tag it would sit dangling for ever —
+	// one more ~100 MB image per self-update. Only when no tag is left on it (one would be someone's
+	// on purpose), and not forced, so a container still on it makes Docker refuse and it stays.
+	if oldPrevious != "" && oldPrevious != runningID {
+		if tags, err := dockerOut(ctx, "image", "inspect", "--format", "{{len .RepoTags}}", oldPrevious); err == nil && tags == "0" {
+			_ = runDocker(ctx, "image", "rm", oldPrevious)
+		}
+	}
 
 	backup := m.container + "-previous"
 	if err := saveState(dir, State{

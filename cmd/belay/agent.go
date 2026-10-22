@@ -20,6 +20,7 @@ import (
 	"github.com/El-Mundos/belay/internal/discover"
 	"github.com/El-Mundos/belay/internal/engine"
 	"github.com/El-Mundos/belay/internal/health"
+	"github.com/El-Mundos/belay/internal/journal"
 	"github.com/El-Mundos/belay/internal/registry"
 	"github.com/El-Mundos/belay/internal/selfupdate"
 	"github.com/El-Mundos/belay/internal/version"
@@ -90,6 +91,24 @@ func runAgent(args []string) {
 		}
 	}()
 
+	// Settle any update the previous agent process was killed in the middle of, now that the server
+	// is reachable to hear about it.
+	jr := journal.Open(*dataDir)
+	go agent.RecoverAll(context.Background(), jr, 3*time.Minute, func(e journal.Entry, r agent.Recovery) {
+		if r.Outcome == engine.OutcomeRolledBack && e.Snapshot != "" && eng.Snapshot != nil {
+			// running on its old image: the snapshot was never needed, and agents keep none
+			eng.Snapshot.Discard(context.Background(), engine.Request{Project: e.File, Service: e.Service}, e.Snapshot)
+		} else if e.Snapshot != "" {
+			r.Note += " Its pre-update data is kept in volume belay-snapshots as " + e.Snapshot + "."
+		}
+		log.Printf("recovered %s/%s: %s", projName(e.File), e.Service, r.Note)
+		res := cluster.Result{CommandID: e.CommandID, Host: host, Project: projName(e.File), Service: e.Service,
+			From: e.From, To: e.To, Outcome: string(r.Outcome), Err: r.Note, Duration: "-"}
+		if err := ac.postResult(res); err != nil {
+			log.Printf("post result: %v", err)
+		}
+	})
+
 	// poll loop: block for a command, run it, post the result
 	for {
 		cmd, ok, err := ac.poll()
@@ -118,8 +137,15 @@ func runAgent(args []string) {
 			}
 			continue
 		}
+		if cmd.Kind == cluster.KindPrune {
+			res := runPrune(cmd, host, *dataDir)
+			if err := ac.postResult(res); err != nil {
+				log.Printf("post result: %v", err)
+			}
+			continue
+		}
 		log.Printf("command %s: update %s in %s → %s", cmd.ID, cmd.Service, cmd.Project, cmd.Image)
-		res := runCommand(eng, cmd, host)
+		res := runCommand(eng, jr, cmd, host)
 		if err := ac.postResult(res); err != nil {
 			log.Printf("post result: %v", err)
 		}
@@ -159,7 +185,7 @@ func collectProjects(explicit stringList, su *selfupdate.Manager) []cluster.Proj
 }
 
 // runCommand executes one update command locally with the safe-update engine.
-func runCommand(eng *engine.Engine, cmd cluster.Command, host string) cluster.Result {
+func runCommand(eng *engine.Engine, jr *journal.Journal, cmd cluster.Command, host string) cluster.Result {
 	res := cluster.Result{CommandID: cmd.ID, Host: host, Project: projName(cmd.Project), Service: cmd.Service, To: cmd.Image}
 	current, err := compose.FindImage(cmd.Project, cmd.Service)
 	if err != nil {
@@ -175,12 +201,28 @@ func runCommand(eng *engine.Engine, cmd cluster.Command, host string) cluster.Re
 			log.Printf("command %s: registry auth: %v", cmd.ID, err)
 		}
 	}
-	r := engine.Request{Project: cmd.Project, Service: cmd.Service, FromImage: current, ToImage: cmd.Image}
-	out := eng.SafeUpdate(context.Background(), r)
+	ctx := context.Background()
+	fromID := agent.ServiceImageID(ctx, cmd.Project, cmd.Service)
+	jEntry := journal.Entry{Project: projName(cmd.Project), File: cmd.Project, Service: cmd.Service,
+		From: current, To: cmd.Image, FromImageID: fromID, CommandID: cmd.ID}
+	if err := jr.Begin(jEntry); err != nil {
+		log.Printf("command %s: %v", cmd.ID, err)
+	}
+	defer func() { _ = jr.End(jEntry.Key()) }()
+	r := engine.Request{Project: cmd.Project, Service: cmd.Service, FromImage: current, ToImage: cmd.Image,
+		PullBytes:  cmd.PullBytes,
+		OnSnapshot: func(id string) { _ = jr.SetSnapshot(jEntry.Key(), id) }}
+	out := eng.SafeUpdate(ctx, r)
+	if id := agent.Leftover(ctx, out.Outcome, cmd.Project, cmd.Service, fromID, cmd.Image); id != "" {
+		res.Leftover = &cluster.PruneReport{ImageID: id, Repo: agent.RepoOf(cmd.Image)}
+	}
 	// the agent has no rollback-retention UI, so discard the success snapshot immediately
 	if out.Outcome == engine.OutcomeUpdated && eng.Snapshot != nil && out.Snapshot != "" {
 		eng.Snapshot.Discard(context.Background(), r, out.Snapshot)
 		_ = compose.CommitIfRepo(cmd.Project, fmt.Sprintf("belay: update %s %s -> %s", cmd.Service, current, cmd.Image))
+	}
+	if out.Outcome == engine.OutcomeError && out.Snapshot != "" {
+		log.Printf("command %s: rollback failed; pre-update data kept in volume belay-snapshots as %s", cmd.ID, out.Snapshot)
 	}
 	res.Outcome = string(out.Outcome)
 	res.Logs = strings.TrimSpace(out.Logs)
@@ -189,6 +231,32 @@ func runCommand(eng *engine.Engine, cmd cluster.Command, host string) cluster.Re
 		res.Err = out.Err.Error()
 	}
 	return res
+}
+
+// runPrune removes an image an earlier update left unused, when the server says its window is over.
+// The server tracks when; only this host can tell whether anything here still needs the image, so
+// the self-update journal's images are protected here too.
+func runPrune(cmd cluster.Command, host, dataDir string) cluster.Result {
+	keep := map[string]string{}
+	if dataDir != "" {
+		st := selfupdate.LoadState(dataDir)
+		if st.FromImage != "" {
+			keep[st.FromImage] = "it is the agent's own previous image (self-update)"
+		}
+		if st.Rollback != nil && st.Rollback.Image != "" {
+			keep[st.Rollback.Image] = "the agent's self-update rollback still needs it"
+		}
+	}
+	pr := agent.Prune(context.Background(), cmd.ImageID, cmd.Repo, keep)
+	if len(pr.Removed) > 0 {
+		log.Printf("command %s: removed %s (%s freed)", cmd.ID, strings.Join(pr.Removed, ", "), agent.HumanBytes(pr.Bytes))
+	} else if pr.Kept != "" {
+		log.Printf("command %s: kept %s: %s", cmd.ID, cmd.ImageID, pr.Kept)
+	}
+	return cluster.Result{CommandID: cmd.ID, Host: host, Outcome: "pruned", Prune: &cluster.PruneReport{
+		ImageID: cmd.ImageID, Repo: cmd.Repo, Removed: pr.Removed, Bytes: pr.Bytes,
+		Gone: pr.Gone, Kept: pr.Kept, Retry: pr.Retry,
+	}}
 }
 
 func projName(file string) string { return filepath.Base(filepath.Dir(file)) }
@@ -211,7 +279,8 @@ type agentClient struct {
 }
 
 func (a *agentClient) register(projects []cluster.Project) error {
-	body, _ := json.Marshal(cluster.Registration{Host: a.host, Version: version.Version, Projects: projects})
+	body, _ := json.Marshal(cluster.Registration{Host: a.host, Version: version.Version,
+		Caps: []string{cluster.CapPrune}, Projects: projects})
 	return a.do(a.hc, http.MethodPost, "/agent/register", body, nil)
 }
 

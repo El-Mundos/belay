@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -70,8 +72,8 @@ func (s Snapshotter) Snapshot(ctx context.Context, r engine.Request) (string, er
 	id := fmt.Sprintf("%s-%d", sanitize(r.Service), time.Now().UnixNano())
 	for i, src := range srcs {
 		script := fmt.Sprintf("mkdir -p /snap/%s && tar czf /snap/%s/%d.tgz -C /v . 2>/dev/null || true", id, id, i)
-		if err := run(ctx, "docker", "run", "--rm",
-			"-v", src+":/v:ro", "-v", snapVolume+":/snap", helperImage, "sh", "-c", script); err != nil {
+		if err := run(ctx, "docker", helperRun("snapshot",
+			"-v", src+":/v:ro", "-v", snapVolume+":/snap", helperImage, "sh", "-c", script)...); err != nil {
 			return "", err
 		}
 	}
@@ -90,14 +92,29 @@ func (s Snapshotter) Restore(ctx context.Context, r engine.Request, snap string)
 	}
 	for i, src := range srcs {
 		script := fmt.Sprintf("[ -f /snap/%s/%d.tgz ] && { find /v -mindepth 1 -delete 2>/dev/null; tar xzf /snap/%s/%d.tgz -C /v; } || true", snap, i, snap, i)
-		_ = run(ctx, "docker", "run", "--rm",
-			"-v", src+":/v", "-v", snapVolume+":/snap", helperImage, "sh", "-c", script)
+		_ = run(ctx, "docker", helperRun("restore",
+			"-v", src+":/v", "-v", snapVolume+":/snap", helperImage, "sh", "-c", script)...)
 	}
 	return nil
 }
 
 func (Snapshotter) Discard(ctx context.Context, r engine.Request, snap string) {
-	_ = run(ctx, "docker", "run", "--rm", "-v", snapVolume+":/snap", helperImage, "rm", "-rf", "/snap/"+snap)
+	_ = run(ctx, "docker", helperRun("discard", "-v", snapVolume+":/snap", helperImage, "rm", "-rf", "/snap/"+snap)...)
+}
+
+// helperLabel marks every throwaway container Belay starts, so monitoring can tell them apart from
+// real services: they live for a second or two, and a "container disappeared" alert on each one is
+// noise. Filter on it (cAdvisor exports it as container_label_belay_helper).
+const helperLabel = "belay.helper"
+
+// helperRun builds `docker run` arguments for a short-lived helper container. Without a name Docker
+// invents one ("quirky_hopper"), and an alert or log line about it says nothing about where it came
+// from; this names it belay-<purpose>-<random>, random so concurrent updates never collide.
+func helperRun(purpose string, args ...string) []string {
+	b := make([]byte, 3)
+	_, _ = rand.Read(b)
+	name := "belay-" + purpose + "-" + hex.EncodeToString(b)
+	return append([]string{"run", "--rm", "--name", name, "--label", helperLabel + "=" + purpose}, args...)
 }
 
 func sanitize(s string) string {

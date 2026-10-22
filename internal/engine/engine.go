@@ -25,12 +25,14 @@ const (
 
 // Request describes a single service update.
 type Request struct {
-	Project   string             // compose project name / directory
-	Service   string             // compose service name
-	FromImage string             // current image ref, e.g. "grafana/grafana-oss:13.0.2"
-	ToImage   string             // target image ref, e.g. "grafana/grafana-oss:13.1.0"
-	Rebase    bool               // same tag, new build behind it: force a pull instead of a tag rewrite
-	OnPhase   func(phase string) // optional: reports the current stage (snapshotting/pulling/health…)
+	Project    string             // compose project name / directory
+	Service    string             // compose service name
+	FromImage  string             // current image ref, e.g. "grafana/grafana-oss:13.0.2"
+	ToImage    string             // target image ref, e.g. "grafana/grafana-oss:13.1.0"
+	Rebase     bool               // same tag, new build behind it: force a pull instead of a tag rewrite
+	PullBytes  int64              // compressed size of ToImage's layers (0 = unknown: skip the disk check)
+	OnPhase    func(phase string) // optional: reports the current stage (snapshotting/pulling/health…)
+	OnSnapshot func(id string)    // optional: called once the volume snapshot exists, so it can be journaled
 }
 
 func (r Request) phase(p string) {
@@ -44,7 +46,7 @@ type Result struct {
 	Request  Request
 	Outcome  Outcome
 	Logs     string // container logs captured during the update (success or failure)
-	Snapshot string // on success: the retained volume snapshot id (caller owns cleanup); "" if none
+	Snapshot string // retained volume snapshot id (caller owns cleanup) on success, or when a rollback failed; "" if none
 	Duration time.Duration
 	Err      error
 }
@@ -83,6 +85,10 @@ type Snapshotter interface {
 	Discard(ctx context.Context, r Request, snapshot string)
 }
 
+// RollbackTimeout bounds an automatic rollback, which runs on its own deadline (see rollback). The
+// previous image is normally still on disk, so this is a recreate rather than a pull.
+var RollbackTimeout = 5 * time.Minute
+
 // Engine performs safe updates: snapshot, deploy, health-gate, and roll back (image + data) on failure.
 type Engine struct {
 	Deployer Deployer
@@ -109,7 +115,7 @@ func (e *Engine) SafeUpdate(ctx context.Context, r Request) Result {
 	// before the tag is touched, so a project whose variables are missing is left exactly as it
 	// was — no rollback needed, because nothing happened.
 	if p, ok := e.Deployer.(Preflighter); ok {
-		r.phase("checking the deployment renders")
+		r.phase("checking the deployment renders and fits on disk")
 		if err := p.Preflight(ctx, r); err != nil {
 			return finish(OutcomeError, err)
 		}
@@ -120,6 +126,9 @@ func (e *Engine) SafeUpdate(ctx context.Context, r Request) Result {
 	if e.Snapshot != nil {
 		r.phase("snapshotting volumes")
 		snap, _ = e.Snapshot.Snapshot(ctx, r)
+		if snap != "" && r.OnSnapshot != nil {
+			r.OnSnapshot(snap)
+		}
 	}
 
 	// 1. move to the new tag and bring it up
@@ -183,9 +192,20 @@ func (e *Engine) discard(ctx context.Context, r Request, snap string) {
 
 // rollback captures logs, restores the previous image AND (if snapshotted) the volume data, and
 // reports. If the rollback itself fails, that's an OutcomeError — the one case that needs a human now.
+//
+// The rollback gets a fresh deadline of its own. The commonest reason to be here is that the update
+// ran out of time — a slow pull hitting the caller's deadline — and a rollback run on that same,
+// already-expired context fails at its first docker call, turning a recoverable timeout into an
+// error that needs a human (and, before this, a leaked snapshot each time it happened).
+//
+// When it does fail, the snapshot is handed back in res.Snapshot rather than discarded: it is the
+// only copy of the pre-update data, and the caller decides how long to keep it.
 func (e *Engine) rollback(ctx context.Context, r Request, res *Result, start time.Time, cause error, snap string) Result {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), RollbackTimeout)
+	defer cancel()
 	fail := func(err error) Result {
 		res.Outcome, res.Err, res.Duration = OutcomeError, err, time.Since(start)
+		res.Snapshot = snap
 		return *res
 	}
 	r.phase("unhealthy — rolling back")

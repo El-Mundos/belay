@@ -66,6 +66,19 @@ service on the exact image it had before — and stops the bad build being pulle
 > Digest tracking inspects the local image, so it currently covers services on the Belay host.
 > Remote agents report their images but not yet their digests, so rebases there go unnoticed.
 
+### Cleaning up after itself
+
+Every update leaves the old image behind, and a host that updates often fills its image store with
+them. Once a service's rollback window ends, Belay removes the image the update replaced (and the
+target of an update that rolled back), then reports what it freed on that update's History card. It
+removes only images it replaced, identified by image ID; it keeps any image a container still uses,
+running or stopped, any image a rollback could still need, and any image carrying a tag from another
+repository, which someone put there by hand. Agent hosts are cleaned the same way. Turn it off in
+Settings → Automation.
+
+Before pulling, Belay also checks the image store has room: it reads the image's compressed size from
+the registry and refuses the update, before anything changes, when the host cannot hold it unpacked.
+
 ### What Belay will not update
 
 Two services in a Belay deployment cannot be recreated by the Belay doing the recreating, so they are

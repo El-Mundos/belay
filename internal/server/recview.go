@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/El-Mundos/belay/internal/agent"
 	"github.com/El-Mundos/belay/internal/store"
 )
 
@@ -68,6 +69,25 @@ func (v recView) Failure() bool {
 // IsSelfUpdate reports whether a record is Belay updating itself rather than a compose service.
 func (v recView) IsSelfUpdate() bool {
 	return v.Project == SelfUpdateProject && v.Service == SelfUpdateService
+}
+
+// FreedSummary says what removing this attempt's leftover image gave back, e.g.
+// "removed goauthentik/server:2026.8.4 · freed 1.9 GB". Empty until the removal has happened.
+func (v recView) FreedSummary() string {
+	var refs []string
+	var bytes int64
+	for _, f := range v.Freed {
+		refs = append(refs, f.Refs...)
+		bytes += f.Bytes
+	}
+	if len(refs) == 0 {
+		return ""
+	}
+	out := "removed " + strings.Join(refs, ", ")
+	if bytes > 0 {
+		out += " · freed " + agent.HumanBytes(bytes)
+	}
+	return out
 }
 
 func newRecView(r store.Record) recView {
@@ -150,9 +170,10 @@ func errPreview(msg string) (preview string, more bool) {
 func listRev(rows []recView) string {
 	h := fnv.New64a()
 	for _, r := range rows {
-		fmt.Fprintf(h, "%d|%s|%s|%s|%s|%t|%t|%t|%s|%s;",
+		fmt.Fprintf(h, "%d|%s|%s|%s|%s|%t|%t|%t|%s|%s|%s|%s;",
 			r.ID, r.Outcome, r.From, r.To, r.Duration,
-			r.CanRollback, r.SelfRollback, r.Superseded, r.Expires, r.RollbackWhy)
+			r.CanRollback, r.SelfRollback, r.Superseded, r.Expires, r.RollbackWhy,
+			r.FreedSummary(), r.PruneNote)
 	}
 	return strconv.FormatUint(h.Sum64(), 36)
 }

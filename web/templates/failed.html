@@ -25,6 +25,8 @@
       </div>
     {{end}}
     <div class="rec-meta muted">{{.Project}} · {{.Time.Format "Jan 2, 15:04"}}</div>
+    {{with .FreedSummary}}<div class="rec-meta muted small">{{.}}</div>{{end}}
+    {{with .PruneNote}}<div class="rec-meta muted small">{{.}}</div>{{end}}
 
     {{if .Earlier}}
     {{/* The retry chain: previous attempts at this same service, newest first. */}}

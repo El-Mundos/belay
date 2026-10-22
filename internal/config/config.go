@@ -50,21 +50,25 @@ type ServiceGroup struct {
 
 // Settings is the whole persisted config document.
 type Settings struct {
-	RollbackWindowHours int              `json:"rollback_window_hours"` // 0 = retention off
-	AutoCheckHours      int              `json:"auto_check_hours"`      // 0 = auto-check off
-	AllowMajor          bool             `json:"allow_major"`           // include major version bumps in update-all
-	QuietHours          bool             `json:"quiet_hours"`           // suppress notifications during the window
-	QuietStart          int              `json:"quiet_start"`           // hour 0-23
-	QuietEnd            int              `json:"quiet_end"`             // hour 0-23
-	Concurrency         int              `json:"concurrency"`           // parallel updates in update-all (min 1)
-	MetricsToken        string           `json:"metrics_token"`         // if set, /metrics requires ?token= or Bearer
-	RequireGroup        string           `json:"require_group"`         // if set, forward-auth callers must belong to this group
-	Theme               string           `json:"theme"`                 // "" = follow the OS, else "light" or "dark"
-	Notify              Notify           `json:"notify"`
-	Registries          []Registry       `json:"registries"` // private-registry credentials for checks + pulls
-	Pins                map[string]bool  `json:"pins"`       // key = project\x00service → ignored for updates
-	Probes              map[string]Probe `json:"probes"`     // key = project\x00service
-	Groups              []ServiceGroup   `json:"groups"`     // services that must move together
+	RollbackWindowHours int `json:"rollback_window_hours"` // 0 = retention off
+	// KeepReplacedImages turns OFF removing the image an update replaced once its rollback window
+	// ends. Stated as the negative so that a settings.json written before the option existed, which
+	// lacks the key, reads as false and gets the default: clean up.
+	KeepReplacedImages bool             `json:"keep_replaced_images"`
+	AutoCheckHours     int              `json:"auto_check_hours"` // 0 = auto-check off
+	AllowMajor         bool             `json:"allow_major"`      // include major version bumps in update-all
+	QuietHours         bool             `json:"quiet_hours"`      // suppress notifications during the window
+	QuietStart         int              `json:"quiet_start"`      // hour 0-23
+	QuietEnd           int              `json:"quiet_end"`        // hour 0-23
+	Concurrency        int              `json:"concurrency"`      // parallel updates in update-all (min 1)
+	MetricsToken       string           `json:"metrics_token"`    // if set, /metrics requires ?token= or Bearer
+	RequireGroup       string           `json:"require_group"`    // if set, forward-auth callers must belong to this group
+	Theme              string           `json:"theme"`            // "" = follow the OS, else "light" or "dark"
+	Notify             Notify           `json:"notify"`
+	Registries         []Registry       `json:"registries"` // private-registry credentials for checks + pulls
+	Pins               map[string]bool  `json:"pins"`       // key = project\x00service → ignored for updates
+	Probes             map[string]Probe `json:"probes"`     // key = project\x00service
+	Groups             []ServiceGroup   `json:"groups"`     // services that must move together
 }
 
 // GroupFor returns the name of the service group a service belongs to, if any.

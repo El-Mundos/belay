@@ -25,6 +25,7 @@ import (
 	"github.com/El-Mundos/belay/internal/config"
 	"github.com/El-Mundos/belay/internal/engine"
 	"github.com/El-Mundos/belay/internal/health"
+	"github.com/El-Mundos/belay/internal/journal"
 	"github.com/El-Mundos/belay/internal/notify"
 	"github.com/El-Mundos/belay/internal/registry"
 	"github.com/El-Mundos/belay/internal/selfupdate"
@@ -69,6 +70,7 @@ type Server struct {
 	sess      map[string]struct{}
 	checks    map[string]checkResult // auto-check cache, key project\x00service
 	jobs      *jobManager            // live activity panel (SSE)
+	journal   *journal.Journal       // updates in flight, so one cut short by a restart is noticed
 	su        *selfupdate.Manager    // belay self-update (nil-safe if not in a container)
 	hostName  string                 // the machine Belay manages (not this container's id)
 	suAvail   bool                   // cached: a newer belay image is available
@@ -172,6 +174,7 @@ func New(cfg Config) *Server {
 		sess:     map[string]struct{}{},
 		checks:   map[string]checkResult{},
 		jobs:     newJobManager(),
+		journal:  journal.Open(cfg.DataDir),
 		su:       selfupdate.Detect(context.Background()),
 		hostName: agent.HostName(context.Background()),
 		agents:   map[string]*agentConn{},
@@ -246,10 +249,12 @@ func (s *Server) Run() error {
 	mux.HandleFunc("GET /agent/poll", s.handleAgentPoll)
 	mux.HandleFunc("POST /agent/result", s.handleAgentResult)
 
-	s.reconcileSelfUpdate() // settle (and record) any self-update that was in flight when we died
-	go s.sweepRollbacks()   // discard snapshots whose retention window has passed
-	go s.autoCheckLoop()    // periodic version checks (cache + notify), per settings
-	go s.selfUpdateWatch()  // cache whether a newer belay image is available
+	s.reconcileSelfUpdate()   // settle (and record) any self-update that was in flight when we died
+	go s.recoverInterrupted() // settle updates a previous process was killed in the middle of
+	go s.sweepRollbacks()     // discard snapshots whose retention window has passed
+	go s.sweepImages()        // remove images updates replaced, once nothing can need them
+	go s.autoCheckLoop()      // periodic version checks (cache + notify), per settings
+	go s.selfUpdateWatch()    // cache whether a newer belay image is available
 
 	if !s.authEnabled() {
 		log.Printf("WARNING: no auth configured (set --password or --forward-header); bind to localhost only.")
@@ -676,14 +681,13 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/history", http.StatusSeeOther)
 }
 
-// sweepRollbacks discards snapshots whose retention window has elapsed.
+// sweepRollbacks expires rollback points whose retention window has elapsed and discards their
+// snapshots. It runs with snapshots off too: an expired point that lingered would go on protecting
+// its old image from removal for ever.
 func (s *Server) sweepRollbacks() {
-	if s.eng.Snapshot == nil {
-		return
-	}
 	for range time.Tick(5 * time.Minute) {
 		for _, pt := range s.store.SweepExpired(time.Now()) {
-			if pt.Snapshot != "" {
+			if pt.Snapshot != "" && s.eng.Snapshot != nil {
 				s.eng.Snapshot.Discard(context.Background(), engine.Request{Project: pt.File, Service: pt.Service}, pt.Snapshot)
 			}
 		}
@@ -1301,6 +1305,8 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 		}
 	}
 
+	fromID := agent.ServiceImageID(ctx, p.File, service) // the exact image this update replaces
+
 	job := s.jobs.start(p.Name, service, current, target)
 	if job == nil {
 		// Someone (or an update-all batch) is already updating this service; two engines racing on
@@ -1308,18 +1314,35 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 		return engine.Result{Outcome: engine.OutcomeSkipped,
 			Err: fmt.Errorf("already updating %s — see Activity", service)}, current
 	}
+	// Journal it before anything is touched; the entry is removed once the outcome is recorded.
+	jEntry := journal.Entry{Project: p.Name, File: p.File, Service: service, From: from, To: target,
+		FromImageID: fromID, Rebase: rebase}
+	if err := s.journal.Begin(jEntry); err != nil {
+		log.Printf("%s/%s: %v (this update could not be recovered if Belay stopped now)", p.Name, service, err)
+	}
+	defer func() { _ = s.journal.End(jEntry.Key()) }()
+
 	logCtx, stopLogs := context.WithCancel(ctx)
 	go s.streamLogs(logCtx, p.File, service, job) // live progress in the Activity tray
 
 	res := s.eng.SafeUpdate(ctx, engine.Request{
 		Project: p.File, Service: service, FromImage: from, ToImage: target, Rebase: rebase,
-		OnPhase: func(ph string) { s.jobs.setPhase(job, ph) },
+		PullBytes:  s.pullBytes(ctx, target),
+		OnPhase:    func(ph string) { s.jobs.setPhase(job, ph) },
+		OnSnapshot: func(id string) { _ = s.journal.SetSnapshot(jEntry.Key(), id) },
 	})
 	stopLogs()
 
 	if res.Outcome == engine.OutcomeUpdated {
 		_ = compose.CommitIfRepo(p.File, fmt.Sprintf("belay: update %s %s -> %s", service, current, target))
-		s.retainRollback(ctx, p, service, current, target, res.Snapshot)
+		// `from`, not `current`: after a rebase the tag already names the new build, so only the
+		// digest still means "the image we were running".
+		s.retainRollback(ctx, p, service, from, fromID, target, res.Snapshot)
+	}
+	if res.Outcome == engine.OutcomeError && res.Snapshot != "" {
+		// The rollback itself failed, so the snapshot is the only copy of the pre-update data. Keep
+		// it as this service's rollback point: the window bounds it, where before it leaked for good.
+		s.retainRollback(ctx, p, service, from, fromID, target, res.Snapshot)
 	}
 	errStr := ""
 	if res.Err != nil {
@@ -1334,11 +1357,14 @@ func (s *Server) applyUpdate(ctx context.Context, p Project, service, target str
 		}
 	}
 	s.jobs.finish(job, string(res.Outcome), strings.TrimSpace(res.Logs))
-	s.store.Add(store.Record{
+	recID := s.store.Add(store.Record{
 		Project: p.Name, Service: service, From: current, To: target,
 		Outcome: string(res.Outcome), Err: errStr, Logs: strings.TrimSpace(res.Logs),
 		Duration: res.Duration.Round(time.Millisecond).String(),
 	})
+	if id := agent.Leftover(ctx, res.Outcome, p.File, service, fromID, target); id != "" {
+		s.schedulePrune("", id, agent.RepoOf(target), recID)
+	}
 	switch res.Outcome {
 	case engine.OutcomeRolledBack, engine.OutcomeError:
 		s.notify.Failure(notify.Event{
@@ -1411,7 +1437,7 @@ func rollbackCaveat(file, service string) string {
 // retainRollback keeps a successful update's snapshot + old image as the service's single rollback
 // point for the retention window, discarding any point it supersedes. If retention is off, it
 // discards the snapshot immediately.
-func (s *Server) retainRollback(ctx context.Context, p Project, service, from, to, snapshot string) {
+func (s *Server) retainRollback(ctx context.Context, p Project, service, from, fromID, to, snapshot string) {
 	window := s.set.RollbackWindow()
 	if window <= 0 {
 		if s.eng.Snapshot != nil && snapshot != "" {
@@ -1422,7 +1448,7 @@ func (s *Server) retainRollback(ctx context.Context, p Project, service, from, t
 	now := time.Now()
 	old, had := s.store.SetRollback(store.RollbackPoint{
 		Project: p.Name, Service: service, File: p.File,
-		FromImage: from, ToImage: to, Snapshot: snapshot,
+		FromImage: from, FromImageID: fromID, ToImage: to, Snapshot: snapshot,
 		CreatedAt: now, ExpiresAt: now.Add(window),
 	})
 	if had && old.Snapshot != "" && s.eng.Snapshot != nil {

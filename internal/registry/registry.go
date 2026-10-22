@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -285,43 +286,55 @@ func (c *Client) nextLink(ref Ref, link string) string {
 	return fmt.Sprintf("%s://%s%s", c.Scheme, ref.Registry, p)
 }
 
+// manifestAccept is every manifest flavour we can read: a multi-arch index or a single image, in
+// either the OCI or the Docker media type.
+const manifestAccept = "application/vnd.oci.image.index.v1+json," +
+	"application/vnd.docker.distribution.manifest.list.v2+json," +
+	"application/vnd.oci.image.manifest.v1+json," +
+	"application/vnd.docker.distribution.manifest.v2+json"
+
+// platformManifest fetches the image manifest for this machine's architecture, following a
+// multi-arch index when the tag points at one. nil (no error) means the index had no entries.
+func (c *Client) platformManifest(ctx context.Context, ref Ref, token *string) ([]byte, error) {
+	man, ct, err := c.registryGet(ctx, ref, "/manifests/"+ref.Tag, manifestAccept, token)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.Contains(ct, "index") && !strings.Contains(ct, "list") {
+		return man, nil
+	}
+	var idx struct {
+		Manifests []struct {
+			Digest   string                        `json:"digest"`
+			Platform struct{ Architecture string } `json:"platform"`
+		} `json:"manifests"`
+	}
+	json.Unmarshal(man, &idx)
+	dig := ""
+	for _, m := range idx.Manifests {
+		if m.Platform.Architecture == runtime.GOARCH {
+			dig = m.Digest
+			break
+		}
+	}
+	if dig == "" && len(idx.Manifests) > 0 {
+		dig = idx.Manifests[0].Digest
+	}
+	if dig == "" {
+		return nil, nil
+	}
+	man, _, err = c.registryGet(ctx, ref, "/manifests/"+dig, manifestAccept, token)
+	return man, err
+}
+
 // SourceRepo returns the image's source repository from its OCI `org.opencontainers.image.source`
 // label (empty string if the image doesn't set one). Best-effort: it fetches the manifest, follows
 // a multi-arch index to a concrete manifest, then reads the config blob's labels.
 func (c *Client) SourceRepo(ctx context.Context, ref Ref) (string, error) {
-	const accept = "application/vnd.oci.image.index.v1+json," +
-		"application/vnd.docker.distribution.manifest.list.v2+json," +
-		"application/vnd.oci.image.manifest.v1+json," +
-		"application/vnd.docker.distribution.manifest.v2+json"
 	token := ""
-	man, ct, err := c.registryGet(ctx, ref, "/manifests/"+ref.Tag, accept, &token)
-	if err != nil {
+	man, err := c.platformManifest(ctx, ref, &token)
+	if err != nil || man == nil {
 		return "", err
-	}
-	if strings.Contains(ct, "index") || strings.Contains(ct, "list") {
-		var idx struct {
-			Manifests []struct {
-				Digest   string                        `json:"digest"`
-				Platform struct{ Architecture string } `json:"platform"`
-			} `json:"manifests"`
-		}
-		json.Unmarshal(man, &idx)
-		dig := ""
-		for _, m := range idx.Manifests {
-			if m.Platform.Architecture == "amd64" {
-				dig = m.Digest
-				break
-			}
-		}
-		if dig == "" && len(idx.Manifests) > 0 {
-			dig = idx.Manifests[0].Digest
-		}
-		if dig == "" {
-			return "", nil
-		}
-		if man, _, err = c.registryGet(ctx, ref, "/manifests/"+dig, accept, &token); err != nil {
-			return "", err
-		}
 	}
 	var m struct {
 		Config struct{ Digest string } `json:"config"`
@@ -339,6 +352,32 @@ func (c *Client) SourceRepo(ctx context.Context, ref Ref) (string, error) {
 	}
 	json.Unmarshal(blob, &cfg)
 	return cfg.Config.Labels["org.opencontainers.image.source"], nil
+}
+
+// PullSize returns the compressed size of an image's layers for this machine's architecture: what
+// a pull downloads if none of the layers are present yet. 0 (no error) means the manifest did not
+// say. It is the input to the pre-pull disk check, which only needs an upper bound, so layers the
+// host already holds are deliberately not subtracted.
+func (c *Client) PullSize(ctx context.Context, ref Ref) (int64, error) {
+	if ref.Tag == "" {
+		ref.Tag = "latest"
+	}
+	token := ""
+	man, err := c.platformManifest(ctx, ref, &token)
+	if err != nil || man == nil {
+		return 0, err
+	}
+	var m struct {
+		Layers []struct{ Size int64 } `json:"layers"`
+	}
+	if err := json.Unmarshal(man, &m); err != nil {
+		return 0, err
+	}
+	var n int64
+	for _, l := range m.Layers {
+		n += l.Size
+	}
+	return n, nil
 }
 
 // registryGet does an authenticated GET against /v2/<repo><path>, handling the auth dance. auth holds
