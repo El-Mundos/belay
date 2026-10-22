@@ -72,8 +72,11 @@ func (s Snapshotter) Snapshot(ctx context.Context, r engine.Request) (string, er
 	id := fmt.Sprintf("%s-%d", sanitize(r.Service), time.Now().UnixNano())
 	for i, src := range srcs {
 		script := fmt.Sprintf("mkdir -p /snap/%s && tar czf /snap/%s/%d.tgz -C /v . 2>/dev/null || true", id, id, i)
-		if err := run(ctx, "docker", helperRun("snapshot",
-			"-v", src+":/v:ro", "-v", snapVolume+":/snap", helperImage, "sh", "-c", script)...); err != nil {
+		if _, err := runHelper(ctx, "snapshot",
+			"-v", src+":/v:ro", "-v", snapVolume+":/snap", helperImage, "sh", "-c", script); err != nil {
+			// Don't leave a half-written snapshot behind: nothing records it, so nothing would
+			// ever discard it. Fresh context — the usual reason we are here is that ctx ran out.
+			s.Discard(context.WithoutCancel(ctx), r, id)
 			return "", err
 		}
 	}
@@ -92,14 +95,14 @@ func (s Snapshotter) Restore(ctx context.Context, r engine.Request, snap string)
 	}
 	for i, src := range srcs {
 		script := fmt.Sprintf("[ -f /snap/%s/%d.tgz ] && { find /v -mindepth 1 -delete 2>/dev/null; tar xzf /snap/%s/%d.tgz -C /v; } || true", snap, i, snap, i)
-		_ = run(ctx, "docker", helperRun("restore",
-			"-v", src+":/v", "-v", snapVolume+":/snap", helperImage, "sh", "-c", script)...)
+		_, _ = runHelper(ctx, "restore",
+			"-v", src+":/v", "-v", snapVolume+":/snap", helperImage, "sh", "-c", script)
 	}
 	return nil
 }
 
 func (Snapshotter) Discard(ctx context.Context, r engine.Request, snap string) {
-	_ = run(ctx, "docker", helperRun("discard", "-v", snapVolume+":/snap", helperImage, "rm", "-rf", "/snap/"+snap)...)
+	_, _ = runHelper(ctx, "discard", "-v", snapVolume+":/snap", helperImage, "rm", "-rf", "/snap/"+snap)
 }
 
 // helperLabel marks every throwaway container Belay starts, so monitoring can tell them apart from
@@ -107,14 +110,28 @@ func (Snapshotter) Discard(ctx context.Context, r engine.Request, snap string) {
 // noise. Filter on it (cAdvisor exports it as container_label_belay_helper).
 const helperLabel = "belay.helper"
 
-// helperRun builds `docker run` arguments for a short-lived helper container. Without a name Docker
+// runHelper runs a short-lived helper container and returns its output. Without a name Docker
 // invents one ("quirky_hopper"), and an alert or log line about it says nothing about where it came
 // from; this names it belay-<purpose>-<random>, random so concurrent updates never collide.
-func helperRun(purpose string, args ...string) []string {
+//
+// Cancelling ctx only kills the `docker run` client — the container carries on, so a snapshot cut
+// off by a deadline used to keep writing gigabytes nobody tracked. When ctx ends, the container is
+// removed too.
+func runHelper(ctx context.Context, purpose string, args ...string) (string, error) {
 	b := make([]byte, 3)
 	_, _ = rand.Read(b)
 	name := "belay-" + purpose + "-" + hex.EncodeToString(b)
-	return append([]string{"run", "--rm", "--name", name, "--label", helperLabel + "=" + purpose}, args...)
+	argv := append([]string{"run", "--rm", "--name", name, "--label", helperLabel + "=" + purpose}, args...)
+	out, err := output(ctx, "docker", argv...)
+	if ctx.Err() != nil {
+		rm, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_ = run(rm, "docker", "rm", "-f", name)
+		cancel()
+	}
+	if err != nil {
+		return out, fmt.Errorf("%s helper: %w: %s", purpose, err, firstLine(strings.TrimSpace(out)))
+	}
+	return out, nil
 }
 
 func sanitize(s string) string {

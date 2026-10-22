@@ -543,7 +543,7 @@ func (s *Server) handleRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	// Same path as pressing Update on the dashboard: a background job, so the click returns at once.
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout+30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), opCeiling)
 		defer cancel()
 		s.applyUpdate(ctx, p, rec.Service, rec.To)
 	}()
@@ -659,7 +659,7 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no rollback point for this service", http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout+30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opCeiling)
 	defer cancel()
 	req := engine.Request{Project: pt.File, Service: service, FromImage: pt.FromImage, ToImage: pt.ToImage}
 	res := s.eng.ManualRollback(ctx, req, pt.Snapshot)
@@ -680,6 +680,13 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	})
 	http.Redirect(w, r, "/history", http.StatusSeeOther)
 }
+
+// opCeiling bounds an update or manual rollback started from the UI. It is a ceiling against a hung
+// Docker call, not a time budget: the health gate enforces its own timeout, and everything before it
+// — snapshotting the volumes, pulling the image — takes as long as the data and the line need. It
+// used to be the health timeout + 30s, which a 3.2 GB prometheus volume and a slow pull overran on
+// every click (galaxy, 2026-10-22), while "Update all", which had no deadline, went through.
+const opCeiling = 30 * time.Minute
 
 // sweepRollbacks expires rollback points whose retention window has elapsed and discards their
 // snapshots. It runs with snapshots off too: an expired point that lingered would go on protecting
@@ -792,7 +799,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			"Err": "already updating — see Activity"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Timeout+30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), opCeiling)
 	defer cancel()
 	res, current := s.applyUpdate(ctx, p, service, target)
 

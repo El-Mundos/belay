@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/El-Mundos/belay/internal/engine"
 )
@@ -70,4 +71,21 @@ func TestPrune_LiveDocker(t *testing.T) {
 	}
 	t.Log(err)
 	t.Logf("removed %v, freed %s, image store has %s free", r.Removed, HumanBytes(r.Bytes), HumanBytes(free))
+}
+
+// A helper cut off by its context must not outlive it: the snapshot case wrote gigabytes nobody
+// tracked after Belay had given up on the update.
+func TestRunHelper_LiveCancelRemovesContainer(t *testing.T) {
+	if os.Getenv("BELAY_PRUNE_LIVE") == "" {
+		t.Skip("set BELAY_PRUNE_LIVE=1 to run against the local Docker daemon")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := runHelper(ctx, "livetest", helperImage, "sleep", "30"); err == nil {
+		t.Fatal("expected the deadline to cut the helper off")
+	}
+	out, _ := output(context.Background(), "docker", "ps", "-aq", "--filter", "label="+helperLabel+"=livetest")
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("helper container still exists after its context ended: %s", out)
+	}
 }

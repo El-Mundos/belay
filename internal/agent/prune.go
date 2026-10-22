@@ -200,12 +200,12 @@ func containersUsing(ctx context.Context, imageID string) ([]string, error) {
 // containers in /var/lib/docker; when those are different filesystems, the smaller one is the limit.
 func FreeBytes(ctx context.Context) (int64, error) {
 	const script = `for d in /h/containerd /h/docker /r; do [ -d "$d" ] && df -Pk "$d" | tail -n 1; done; true`
-	args := helperRun("df", "-v", "/var/lib:/h:ro")
+	args := []string{"-v", "/var/lib:/h:ro"}
 	if root := dockerRoot(ctx); root != "" && !strings.HasPrefix(root, "/var/lib/") {
 		args = append(args, "-v", root+":/r:ro") // a relocated data-root lives elsewhere
 	}
 	args = append(args, helperImage, "sh", "-c", script)
-	out, err := output(ctx, "docker", args...)
+	out, err := runHelper(ctx, "df", args...)
 	if err != nil {
 		return 0, fmt.Errorf("measure free space: %s", firstLine(strings.TrimSpace(out)))
 	}
