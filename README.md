@@ -142,6 +142,16 @@ belay update ./mystack grafana grafana/grafana-oss:13.1.0   # safe update + auto
 Gate it behind your reverse-proxy SSO with `--forward-header X-authentik-username`, or use the
 built-in login with `--password` / `BELAY_PASSWORD`.
 
+Forward-auth also needs a shared secret (`BELAY_FORWARD_SECRET`, e.g. `openssl rand -hex 32`) that
+the proxy sends as `X-Belay-Forward-Secret` on every request it forwards; without it the identity
+header is ignored. A bare `X-authentik-username` proves nothing — anything that can reach Belay's
+port could send one — and Belay's admin can recreate every container on the host. With Traefik:
+
+```yaml
+- "traefik.http.middlewares.belay-proxy-secret.headers.customrequestheaders.X-Belay-Forward-Secret=${BELAY_FORWARD_SECRET}"
+- "traefik.http.routers.belay.middlewares=authentik,belay-proxy-secret"
+```
+
 ## Design decisions (locked)
 
 - **Language:** Go — single static binary, tiny image.

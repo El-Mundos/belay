@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -46,6 +47,9 @@ type Config struct {
 	Projects      []Project
 	Password      string
 	ForwardHeader string
+	// ForwardSecret is what the reverse proxy must send in ForwardSecretHeader for ForwardHeader to
+	// be believed. Without it the identity header is ignored: see forwardedUser.
+	ForwardSecret string
 	// ForwardGroupsHeader carries the caller's groups from the reverse proxy, for the optional
 	// Settings group gate (Authentik sends X-authentik-groups, pipe-separated).
 	ForwardGroupsHeader string
@@ -259,6 +263,13 @@ func (s *Server) Run() error {
 	if !s.authEnabled() {
 		log.Printf("WARNING: no auth configured (set --password or --forward-header); bind to localhost only.")
 	}
+	if s.cfg.ForwardHeader != "" && s.cfg.ForwardSecret == "" {
+		log.Printf("SECURITY: --forward-header is set but BELAY_FORWARD_SECRET is not, so the %s "+
+			"header is IGNORED and only the password login works. Set the secret and have the proxy "+
+			"send it as %s (see README).", s.cfg.ForwardHeader, ForwardSecretHeader)
+	} else if s.cfg.ForwardSecret != "" && len(s.cfg.ForwardSecret) < 32 {
+		log.Printf("SECURITY: BELAY_FORWARD_SECRET is under 32 characters; use a long random value")
+	}
 	log.Printf("belay server on http://%s  (%d project(s))", s.cfg.Addr, len(s.cfg.Projects))
 	return http.ListenAndServe(s.cfg.Addr, mux)
 }
@@ -267,11 +278,31 @@ func (s *Server) Run() error {
 
 func (s *Server) authEnabled() bool { return s.cfg.Password != "" || s.cfg.ForwardHeader != "" }
 
+// ForwardSecretHeader carries the shared secret that proves a request came through the reverse
+// proxy. The proxy sets it on every request it forwards, overwriting anything a client sent.
+const ForwardSecretHeader = "X-Belay-Forward-Secret"
+
+// forwardedUser returns the identity the reverse proxy vouched for, or "".
+//
+// The identity header alone proves nothing: any process that can reach Belay's port can send
+// "X-authentik-username: admin", and Belay listens on more than the proxy's network — a published
+// host port, a VPN address, and a Docker network shared with every other web app. Believing it
+// unconditionally made Belay's admin, which can recreate any container on the host, one curl away
+// from any of them. So it is only believed alongside the proxy's secret, and never without one.
+func (s *Server) forwardedUser(r *http.Request) string {
+	if s.cfg.ForwardHeader == "" || s.cfg.ForwardSecret == "" {
+		return ""
+	}
+	got := r.Header.Get(ForwardSecretHeader)
+	if subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.ForwardSecret)) != 1 {
+		return ""
+	}
+	return r.Header.Get(s.cfg.ForwardHeader)
+}
+
 func (s *Server) user(r *http.Request) string {
-	if s.cfg.ForwardHeader != "" {
-		if u := r.Header.Get(s.cfg.ForwardHeader); u != "" {
-			return u
-		}
+	if u := s.forwardedUser(r); u != "" {
+		return u
 	}
 	if c, err := r.Cookie("belay_session"); err == nil {
 		s.mu.Lock()
@@ -300,8 +331,8 @@ func (s *Server) groupAllowed(r *http.Request) bool {
 	if want == "" || s.cfg.ForwardHeader == "" {
 		return true
 	}
-	if r.Header.Get(s.cfg.ForwardHeader) == "" {
-		return true // not a forward-auth identity (password session)
+	if s.forwardedUser(r) == "" {
+		return true // not a forward-auth identity (password session, checked by guard)
 	}
 	header := s.cfg.ForwardGroupsHeader
 	if header == "" {

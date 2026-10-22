@@ -75,6 +75,7 @@ func runServer(args []string) {
 	fs.Var(&projects, "project", "compose project path (file or dir); repeatable")
 	password := fs.String("password", os.Getenv("BELAY_PASSWORD"), "built-in login password (env BELAY_PASSWORD)")
 	forward := fs.String("forward-header", os.Getenv("BELAY_FORWARD_HEADER"), "trusted reverse-proxy user header (e.g. X-authentik-username)")
+	forwardSecret := fs.String("forward-secret", os.Getenv("BELAY_FORWARD_SECRET"), "secret the proxy sends as X-Belay-Forward-Secret; the forward header is ignored without it (env BELAY_FORWARD_SECRET)")
 	forwardGroups := fs.String("forward-groups-header", envOr("BELAY_FORWARD_GROUPS_HEADER", "X-authentik-groups"), "trusted reverse-proxy groups header, used by the Settings group gate")
 	notifyURL := fs.String("notify-webhook", os.Getenv("BELAY_NOTIFY_WEBHOOK"), "webhook URL to POST on failed updates (ntfy/Discord/Slack/…)")
 	agentToken := fs.String("agent-token", os.Getenv("BELAY_AGENT_TOKEN"), "shared token to accept remote agents (env BELAY_AGENT_TOKEN; empty = multi-host off)")
@@ -109,6 +110,7 @@ func runServer(args []string) {
 	}
 	srv := server.New(server.Config{
 		Addr: *addr, Projects: pl, Password: *password, ForwardHeader: *forward,
+		ForwardSecret:       *forwardSecret,
 		ForwardGroupsHeader: *forwardGroups,
 		NotifyWebhook:       *notifyURL, Snapshot: *snapshot, Timeout: *timeout, MinUptime: *minUptime,
 		RollbackWindow: *rollbackWindow, DataDir: *dataDir, AgentToken: *agentToken,

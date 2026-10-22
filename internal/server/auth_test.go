@@ -16,11 +16,25 @@ func gateServer(t *testing.T, requireGroup string) *Server {
 	}
 	return &Server{
 		set: set,
-		cfg: Config{ForwardHeader: "X-authentik-username", ForwardGroupsHeader: "X-authentik-groups"},
+		cfg: Config{ForwardHeader: "X-authentik-username", ForwardGroupsHeader: "X-authentik-groups",
+			ForwardSecret: testSecret},
 	}
 }
 
+const testSecret = "0123456789abcdef0123456789abcdef"
+
+// reqWith builds a request as the proxy would forward it: with the proxy secret whenever it
+// carries a forward-auth identity.
 func reqWith(headers map[string]string) *http.Request {
+	r := rawReq(headers)
+	if r.Header.Get("X-authentik-username") != "" {
+		r.Header.Set(ForwardSecretHeader, testSecret)
+	}
+	return r
+}
+
+// rawReq builds a request exactly as given — what anyone reaching Belay's port can send.
+func rawReq(headers map[string]string) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	for k, v := range headers {
 		r.Header.Set(k, v)
@@ -70,5 +84,46 @@ func TestGroupAllowed_NoForwardAuthConfigured(t *testing.T) {
 	s.cfg.ForwardHeader = ""
 	if !s.groupAllowed(reqWith(nil)) {
 		t.Error("group gate must be inert when forward-auth is not configured")
+	}
+}
+
+// The vulnerability this guards: Belay listens beyond the proxy's reach (host port, VPN address,
+// a Docker network shared with other apps), so a bare identity header must not log anyone in.
+func TestForwardedUserNeedsProxySecret(t *testing.T) {
+	s := gateServer(t, "")
+	for name, tc := range map[string]struct {
+		headers map[string]string
+		want    string
+	}{
+		"spoofed header, no secret": {map[string]string{"X-authentik-username": "admin"}, ""},
+		"wrong secret": {map[string]string{"X-authentik-username": "admin",
+			ForwardSecretHeader: "guess"}, ""},
+		"secret prefix only": {map[string]string{"X-authentik-username": "admin",
+			ForwardSecretHeader: testSecret[:16]}, ""},
+		"through the proxy": {map[string]string{"X-authentik-username": "sergio",
+			ForwardSecretHeader: testSecret}, "sergio"},
+	} {
+		if got := s.user(rawReq(tc.headers)); got != tc.want {
+			t.Errorf("%s: user = %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+func TestForwardHeaderIgnoredWithoutConfiguredSecret(t *testing.T) {
+	s := gateServer(t, "")
+	s.cfg.ForwardSecret = ""
+	r := rawReq(map[string]string{"X-authentik-username": "admin", ForwardSecretHeader: ""})
+	if got := s.user(r); got != "" {
+		t.Errorf("with no secret configured the header must be ignored, got user %q", got)
+	}
+}
+
+// A spoofed identity must not count as a forward-auth caller for the group gate either: it falls
+// back to needing a password session, which guard checks.
+func TestGroupGateIgnoresSpoofedIdentity(t *testing.T) {
+	s := gateServer(t, "belay-admins")
+	r := rawReq(map[string]string{"X-authentik-username": "admin", "X-authentik-groups": "belay-admins"})
+	if s.user(r) != "" {
+		t.Fatal("spoofed identity was accepted")
 	}
 }

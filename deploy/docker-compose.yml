@@ -30,6 +30,9 @@ services:
       DOCKER_HOST: tcp://socket-proxy:2375
       # Gate the UI — EITHER trust your reverse proxy's SSO header…
       BELAY_FORWARD_HEADER: X-authentik-username
+      # …which Belay only believes alongside this secret, sent by the proxy (labels below). Put it
+      # in .env: BELAY_FORWARD_SECRET=$(openssl rand -hex 32)
+      BELAY_FORWARD_SECRET: ${BELAY_FORWARD_SECRET}
       # …OR use the built-in login:  BELAY_PASSWORD: change-me
     volumes:
       - /srv:/srv          # your compose files: Belay edits the tag in place + git-commits it
@@ -40,6 +43,8 @@ services:
     #   - traefik.enable=true
     #   - "traefik.http.routers.belay.rule=Host(`belay.example.com`)"
     #   - traefik.http.services.belay.loadbalancer.server.port=8080
+    #   - "traefik.http.middlewares.belay-proxy-secret.headers.customrequestheaders.X-Belay-Forward-Secret=${BELAY_FORWARD_SECRET}"
+    #   - "traefik.http.routers.belay.middlewares=authentik,belay-proxy-secret"   # after your forward-auth
 
 networks:
   belay-internal:
